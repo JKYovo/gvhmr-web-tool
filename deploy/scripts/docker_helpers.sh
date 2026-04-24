@@ -2,6 +2,7 @@
 
 GVHMR_IMAGE_NAME="${GVHMR_IMAGE_NAME:-gvhmr-web:latest}"
 GVHMR_CONTAINER_NAME="${GVHMR_CONTAINER_NAME:-gvhmr-web}"
+DOCKER_COMPOSE_FILE="${ROOT_DIR}/deploy/docker/docker-compose.yml"
 
 docker_has_compose_plugin() {
   docker compose version >/dev/null 2>&1
@@ -17,9 +18,9 @@ docker_use_compose() {
 
 docker_compose_cmd() {
   if docker_has_compose_plugin; then
-    docker compose "$@"
+    docker compose -f "$DOCKER_COMPOSE_FILE" "$@"
   else
-    docker-compose "$@"
+    docker-compose -f "$DOCKER_COMPOSE_FILE" "$@"
   fi
 }
 
@@ -43,7 +44,7 @@ docker_build_runtime() {
   if docker_use_compose; then
     docker_compose_cmd build gvhmr-web
   else
-    docker build -t "$GVHMR_IMAGE_NAME" -f Dockerfile .
+    docker build -t "$GVHMR_IMAGE_NAME" -f "${ROOT_DIR}/deploy/docker/Dockerfile" "$ROOT_DIR"
   fi
 }
 

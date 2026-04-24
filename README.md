@@ -84,7 +84,7 @@ bash stop_web.sh
 如果你是在本地做开发，而不是走 Docker 部署：
 
 ```bash
-pip install -r requirements-ui.txt
+pip install -r deploy/env/requirements-ui.txt
 python tools/app/run_ui.py
 ```
 
@@ -133,6 +133,14 @@ python tools/app/run_ui.py
 
 ## 仓库结构
 
+- `deploy/docker/`
+  Dockerfile 和 Compose 配置
+- `deploy/env/`
+  运行时和开发环境依赖文件
+- `deploy/scripts/`
+  真正的部署脚本实现
+- 根目录 `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
+  面向使用者的薄包装入口
 - `hmr4d/api/`
   视频转结构化数据的 API 层
 - `hmr4d/service/`
@@ -156,7 +164,7 @@ python tools/app/run_ui.py
 如果你要做开发：
 
 ```bash
-conda env create -f environment-dev.yml
+conda env create -f deploy/env/environment-dev.yml
 conda activate gvhmr-dev
 ```
 

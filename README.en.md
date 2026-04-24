@@ -84,7 +84,7 @@ Subsequent launches reuse the same image and checkpoints.
 If you are developing the project locally instead of using Docker:
 
 ```bash
-pip install -r requirements-ui.txt
+pip install -r deploy/env/requirements-ui.txt
 python tools/app/run_ui.py
 ```
 
@@ -133,6 +133,14 @@ Optional outputs:
 
 ## Repository Layout
 
+- `deploy/docker/`
+  Dockerfile and Compose configuration.
+- `deploy/env/`
+  Runtime and development environment dependency files.
+- `deploy/scripts/`
+  Actual deployment script implementations.
+- root `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
+  Thin convenience wrappers for end users.
 - `hmr4d/api/`
   Reusable API layer for `video -> data`.
 - `hmr4d/service/`
@@ -156,7 +164,7 @@ Optional outputs:
 For development environment setup:
 
 ```bash
-conda env create -f environment-dev.yml
+conda env create -f deploy/env/environment-dev.yml
 conda activate gvhmr-dev
 ```
 

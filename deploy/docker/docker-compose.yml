@@ -1,8 +1,8 @@
 services:
   gvhmr-web:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
     image: gvhmr-web:latest
     container_name: gvhmr-web
     gpus: all
@@ -18,10 +18,10 @@ services:
     ports:
       - "${GVHMR_PORT_BIND:-127.0.0.1:7860:7860}"
     volumes:
-      - ./runtime/checkpoints:/app/runtime/checkpoints
-      - ./runtime/jobs:/app/runtime/jobs
-      - ./runtime/batches:/app/runtime/batches
-      - ./runtime/db:/app/runtime/db
+      - ../../runtime/checkpoints:/app/runtime/checkpoints
+      - ../../runtime/jobs:/app/runtime/jobs
+      - ../../runtime/batches:/app/runtime/batches
+      - ../../runtime/db:/app/runtime/db
     command:
       - python3
       - -m

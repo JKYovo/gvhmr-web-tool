@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements-runtime.txt requirements-ui.txt setup.py pyproject.toml README.md /app/
+COPY deploy/env/requirements-runtime.txt deploy/env/requirements-ui.txt setup.py pyproject.toml README.md /app/
 
 RUN python3 -m pip install --retries 20 --timeout 120 --no-build-isolation chumpy && \
     python3 -m pip install --retries 20 --timeout 120 -r requirements-runtime.txt -r requirements-ui.txt
