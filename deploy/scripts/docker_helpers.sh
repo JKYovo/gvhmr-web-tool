@@ -3,9 +3,26 @@
 GVHMR_IMAGE_NAME="${GVHMR_IMAGE_NAME:-gvhmr-web:latest}"
 GVHMR_CONTAINER_NAME="${GVHMR_CONTAINER_NAME:-gvhmr-web}"
 DOCKER_COMPOSE_FILE="${ROOT_DIR}/deploy/docker/docker-compose.yml"
+GVHMR_DOCKER_USE_SUDO="${GVHMR_DOCKER_USE_SUDO:-0}"
+
+docker_cli() {
+  if [ "${GVHMR_DOCKER_USE_SUDO}" = "1" ]; then
+    sudo docker "$@"
+  else
+    docker "$@"
+  fi
+}
+
+docker_compose_legacy_cmd() {
+  if [ "${GVHMR_DOCKER_USE_SUDO}" = "1" ]; then
+    sudo docker-compose -f "$DOCKER_COMPOSE_FILE" "$@"
+  else
+    docker-compose -f "$DOCKER_COMPOSE_FILE" "$@"
+  fi
+}
 
 docker_has_compose_plugin() {
-  docker compose version >/dev/null 2>&1
+  docker_cli compose version >/dev/null 2>&1
 }
 
 docker_has_legacy_compose() {
@@ -18,23 +35,23 @@ docker_use_compose() {
 
 docker_compose_cmd() {
   if docker_has_compose_plugin; then
-    docker compose -f "$DOCKER_COMPOSE_FILE" "$@"
+    docker_cli compose -f "$DOCKER_COMPOSE_FILE" "$@"
   else
-    docker-compose -f "$DOCKER_COMPOSE_FILE" "$@"
+    docker_compose_legacy_cmd "$@"
   fi
 }
 
 docker_container_exists() {
-  docker ps -a --format '{{.Names}}' | grep -Fxq "$GVHMR_CONTAINER_NAME"
+  docker_cli ps -a --format '{{.Names}}' | grep -Fxq "$GVHMR_CONTAINER_NAME"
 }
 
 docker_container_running() {
-  docker ps --format '{{.Names}}' | grep -Fxq "$GVHMR_CONTAINER_NAME"
+  docker_cli ps --format '{{.Names}}' | grep -Fxq "$GVHMR_CONTAINER_NAME"
 }
 
 docker_build_runtime() {
   if [ "${GVHMR_SKIP_BUILD:-0}" = "1" ]; then
-    docker image inspect "$GVHMR_IMAGE_NAME" >/dev/null 2>&1 || {
+    docker_cli image inspect "$GVHMR_IMAGE_NAME" >/dev/null 2>&1 || {
       echo "Image $GVHMR_IMAGE_NAME not found; cannot skip build." >&2
       return 1
     }
@@ -44,7 +61,7 @@ docker_build_runtime() {
   if docker_use_compose; then
     docker_compose_cmd build gvhmr-web
   else
-    docker build -t "$GVHMR_IMAGE_NAME" -f "${ROOT_DIR}/deploy/docker/Dockerfile" "$ROOT_DIR"
+    docker_cli build -t "$GVHMR_IMAGE_NAME" -f "${ROOT_DIR}/deploy/docker/Dockerfile" "$ROOT_DIR"
   fi
 }
 
@@ -52,7 +69,7 @@ docker_run_oneoff() {
   if docker_use_compose; then
     docker_compose_cmd run --rm --no-deps gvhmr-web "$@"
   else
-    docker run --rm \
+    docker_cli run --rm \
       --gpus all \
       --shm-size 8g \
       -e GVHMR_HOST=0.0.0.0 \
@@ -74,9 +91,9 @@ docker_start_service() {
     docker_compose_cmd up -d gvhmr-web
   else
     if docker_container_exists; then
-      docker rm -f "$GVHMR_CONTAINER_NAME" >/dev/null
+      docker_cli rm -f "$GVHMR_CONTAINER_NAME" >/dev/null
     fi
-    docker run -d \
+    docker_cli run -d \
       --name "$GVHMR_CONTAINER_NAME" \
       --gpus all \
       --shm-size 8g \
@@ -101,7 +118,7 @@ docker_stop_service() {
     docker_compose_cmd down
   else
     if docker_container_exists; then
-      docker rm -f "$GVHMR_CONTAINER_NAME"
+      docker_cli rm -f "$GVHMR_CONTAINER_NAME"
     else
       echo "GVHMR Web container is not running."
     fi
@@ -112,6 +129,6 @@ docker_service_status() {
   if docker_use_compose; then
     docker_compose_cmd ps
   else
-    docker ps -a --filter "name=^/${GVHMR_CONTAINER_NAME}$"
+    docker_cli ps -a --filter "name=^/${GVHMR_CONTAINER_NAME}$"
   fi
 }

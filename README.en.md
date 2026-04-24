@@ -39,12 +39,40 @@ This is the recommended way to run the project on another machine.
 - Docker installed
 - NVIDIA Container Toolkit installed
 
+### Environment Doctor
+
+You can run a standalone environment check first:
+
+```bash
+bash doctor.sh
+```
+
+On Ubuntu / Debian, you can also ask the scripts to attempt automatic repair:
+
+```bash
+bash doctor.sh --fix
+```
+
+Current `--fix` coverage:
+
+- install Docker
+- start `docker.service`
+- install and configure NVIDIA Container Toolkit
+
+For safety, the scripts do not attempt to install an NVIDIA driver. If `nvidia-smi` is unavailable, the doctor exits early and asks the user to install the driver first.
+
 ### Start
 
 From the repository root:
 
 ```bash
 bash start_web.sh
+```
+
+To attempt environment repair before launch:
+
+```bash
+bash start_web.sh --fix
 ```
 
 The Web UI will be served at:
@@ -61,6 +89,12 @@ To expose the service to other devices on the same network:
 bash start_web_lan.sh
 ```
 
+This also supports:
+
+```bash
+bash start_web_lan.sh --fix
+```
+
 ### Status And Stop
 
 ```bash
@@ -72,6 +106,7 @@ bash stop_web.sh
 
 On the first launch, the scripts will:
 
+- check the host environment
 - build the Docker image
 - check CUDA visibility inside the container
 - create `runtime/checkpoints`, `runtime/jobs`, `runtime/batches`, and `runtime/db`
@@ -139,7 +174,7 @@ Optional outputs:
   Runtime and development environment dependency files.
 - `deploy/scripts/`
   Actual deployment script implementations.
-- root `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
+- root `doctor.sh` / `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
   Thin convenience wrappers for end users.
 - `hmr4d/api/`
   Reusable API layer for `video -> data`.
@@ -151,6 +186,8 @@ Optional outputs:
   One-click local Docker start.
 - `start_web_lan.sh`
   One-click LAN-facing Docker start.
+- `doctor.sh`
+  Environment check and optional auto-fix entrypoint.
 
 ## Important Notes
 

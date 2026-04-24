@@ -4,9 +4,41 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+GVHMR_AUTO_FIX=0
+
+usage() {
+  cat <<'EOF'
+Usage: bash start_web.sh [--fix]
+
+Options:
+  --fix   Attempt automatic environment repair on Ubuntu/Debian:
+          install Docker, start docker.service, and configure NVIDIA Container Toolkit.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fix)
+      GVHMR_AUTO_FIX=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
 PORT="${GVHMR_PORT:-7860}"
 export GVHMR_PORT="$PORT"
 export GVHMR_PORT_BIND="127.0.0.1:${PORT}:${PORT}"
+export GVHMR_AUTO_FIX
+source "${SCRIPT_DIR}/environment_helpers.sh"
 source "${SCRIPT_DIR}/docker_helpers.sh"
 
 require_cmd() {
@@ -64,20 +96,10 @@ open_browser() {
 
 cd "$ROOT_DIR"
 
-require_cmd docker
-require_cmd python3
-
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "nvidia-smi is required." >&2
-  exit 1
-fi
-
-docker info >/dev/null
+run_environment_doctor
 if ! docker_container_running; then
   check_port_free
 fi
-
-mkdir -p runtime/checkpoints runtime/jobs runtime/batches runtime/db
 
 docker_build_runtime
 gpu_runtime_check

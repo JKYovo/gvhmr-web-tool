@@ -39,12 +39,40 @@
 - 已安装 Docker
 - 已安装 NVIDIA Container Toolkit
 
+### 环境自检
+
+可以先单独运行环境检查：
+
+```bash
+bash doctor.sh
+```
+
+如果你在 Ubuntu / Debian 上，希望脚本尽量自动补齐运行环境，可以使用：
+
+```bash
+bash doctor.sh --fix
+```
+
+`--fix` 目前会尝试自动处理：
+
+- 安装 Docker
+- 启动 `docker.service`
+- 安装并配置 NVIDIA Container Toolkit
+
+出于安全和稳定性考虑，NVIDIA 驱动本身不会被脚本自动安装；如果 `nvidia-smi` 不可用，脚本会直接报错并提示你先装驱动。
+
 ### 启动
 
 在仓库根目录执行：
 
 ```bash
 bash start_web.sh
+```
+
+如果希望启动前自动尝试修复环境：
+
+```bash
+bash start_web.sh --fix
 ```
 
 默认访问地址：
@@ -61,6 +89,12 @@ http://127.0.0.1:7860/ui
 bash start_web_lan.sh
 ```
 
+同样支持：
+
+```bash
+bash start_web_lan.sh --fix
+```
+
 ### 查看状态与停止服务
 
 ```bash
@@ -72,6 +106,7 @@ bash stop_web.sh
 
 首次启动时，脚本会自动：
 
+- 检查主机运行环境
 - 构建 Docker 镜像
 - 检查容器内 CUDA 是否可用
 - 创建 `runtime/checkpoints`、`runtime/jobs`、`runtime/batches`、`runtime/db`
@@ -139,7 +174,7 @@ python tools/app/run_ui.py
   运行时和开发环境依赖文件
 - `deploy/scripts/`
   真正的部署脚本实现
-- 根目录 `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
+- 根目录 `doctor.sh` / `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
   面向使用者的薄包装入口
 - `hmr4d/api/`
   视频转结构化数据的 API 层
@@ -151,6 +186,8 @@ python tools/app/run_ui.py
   本机 Docker 一键启动
 - `start_web_lan.sh`
   局域网可访问的一键启动
+- `doctor.sh`
+  运行环境检测与可选自动修复入口
 
 ## 重要说明
 
