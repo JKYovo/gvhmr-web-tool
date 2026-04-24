@@ -1,5 +1,5 @@
 import argparse
-import shutil
+import time
 import urllib.request
 from pathlib import Path
 
@@ -46,13 +46,64 @@ DPVO_ASSET = (
 )
 
 
-def download_url(url, target_path):
+def format_bytes(num_bytes):
+    num_bytes = float(num_bytes)
+    units = ("B", "KB", "MB", "GB", "TB")
+    for unit in units:
+        if num_bytes < 1024.0 or unit == units[-1]:
+            return f"{num_bytes:.1f}{unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.1f}TB"
+
+
+def download_url(url, target_path, *, label=None, logger=None):
     target_path = Path(target_path)
     ensure_dir(target_path.parent)
     tmp_path = target_path.with_suffix(target_path.suffix + ".part")
     with urllib.request.urlopen(url) as response, tmp_path.open("wb") as file:
-        shutil.copyfileobj(response, file)
+        total_size = response.headers.get("Content-Length")
+        total_size = int(total_size) if total_size is not None else None
+        if logger and label:
+            if total_size:
+                logger(
+                    f"[Assets] Starting {label} ({format_bytes(total_size)}) -> {target_path}"
+                )
+            else:
+                logger(f"[Assets] Starting {label} -> {target_path}")
+
+        downloaded = 0
+        chunk_size = 8 * 1024 * 1024
+        last_logged_at = time.time()
+        next_percent_report = 10
+
+        while True:
+            chunk = response.read(chunk_size)
+            if not chunk:
+                break
+            file.write(chunk)
+            downloaded += len(chunk)
+
+            if not logger or not label:
+                continue
+
+            now = time.time()
+            if total_size:
+                percent = downloaded * 100 / total_size
+                if percent >= next_percent_report or now - last_logged_at >= 10:
+                    logger(
+                        f"[Assets] {label}: {percent:5.1f}% "
+                        f"({format_bytes(downloaded)} / {format_bytes(total_size)})"
+                    )
+                    while next_percent_report <= percent:
+                        next_percent_report += 10
+                    last_logged_at = now
+            elif now - last_logged_at >= 10:
+                logger(f"[Assets] {label}: downloaded {format_bytes(downloaded)}")
+                last_logged_at = now
+
     tmp_path.replace(target_path)
+    if logger and label:
+        logger(f"[Assets] Finished {label}: {target_path}")
     return target_path
 
 
@@ -71,7 +122,7 @@ def ensure_assets(checkpoint_root, *, with_dpvo=False, logger=None):
             continue
         if logger:
             logger(f"[Assets] Downloading {label}: {target_path}")
-        download_url(url, target_path)
+        download_url(url, target_path, label=label, logger=logger)
         downloaded.append(str(target_path))
 
     return {

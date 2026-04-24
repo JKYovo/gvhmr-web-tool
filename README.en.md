@@ -114,6 +114,29 @@ On the first launch, the scripts will:
 
 Subsequent launches reuse the same image and checkpoints.
 
+### How Long Does First-Time Deployment Usually Take?
+
+On a clean machine, the first deployment mainly downloads two chunks:
+
+- Docker runtime image and Python dependencies, about `11GB`
+- model assets, about `5.6GB`
+
+That means a realistic first-time transfer is roughly `16GB ~ 17GB`.
+
+Typical real-world estimates:
+
+- faster network: about `30 ~ 60` minutes
+- average network: about `45 ~ 90` minutes
+- slower or unstable network: about `1 ~ 3` hours
+
+The slowest stages are usually the Docker `pip install` layer and the later `HMR2` / `ViTPose` checkpoint downloads.
+
+The startup scripts now print the current phase explicitly, for example:
+
+- building / reusing the Docker runtime image
+- checking CUDA inside the container
+- downloading / reusing model assets
+
 ## Local Source Mode
 
 If you are developing the project locally instead of using Docker:

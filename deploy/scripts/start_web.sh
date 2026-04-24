@@ -94,16 +94,25 @@ open_browser() {
   fi
 }
 
+step_note() {
+  echo "[GVHMR] $*"
+}
+
 cd "$ROOT_DIR"
 
+step_note "[1/5] Running environment doctor..."
 run_environment_doctor
 if ! docker_container_running; then
   check_port_free
 fi
 
+step_note "[2/5] Building / reusing Docker runtime image. First build may download about 11GB and take 10-40 minutes."
 docker_build_runtime
+step_note "[3/5] Verifying CUDA inside the container..."
 gpu_runtime_check
+step_note "[4/5] Downloading / reusing model assets. First download is about 5.6GB and may take 10-30+ minutes."
 docker_run_oneoff python3 -m hmr4d.service.assets --checkpoint-root /app/runtime/checkpoints
+step_note "[5/5] Starting GVHMR Web service..."
 docker_start_service
 wait_for_health >/dev/null
 
