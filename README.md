@@ -1,112 +1,114 @@
-# GVHMR Web Tool
+# GVHMR Web 工具
 
-This repository turns [zju3dv/GVHMR](https://github.com/zju3dv/GVHMR) into a local Web tool for:
+[English README](README.en.md)
 
-- uploading a video
-- running GVHMR on a single main person track
-- exporting structured motion data as `gvhmr_data.npz` and `gvhmr_meta.json`
-- optionally generating preview videos
+这个仓库在原始 [zju3dv/GVHMR](https://github.com/zju3dv/GVHMR) 的基础上，做了一个更适合团队内部使用的本地 Web 工具，用于：
 
-It keeps the original GVHMR inference pipeline, but adds:
+- 上传视频
+- 运行 GVHMR 单人主轨推理
+- 导出结构化人体运动数据 `gvhmr_data.npz` 和 `gvhmr_meta.json`
+- 按需生成预览视频
 
-- a reusable Python API in `hmr4d/api/video_to_data.py`
-- a local Web UI
-- a Docker-first deployment path
-- job persistence, batch submission, and downloadable artifacts
+它保留了原始 GVHMR 的推理链路，同时新增了：
 
-## What This Fork Is For
+- 可复用的 Python API：`hmr4d/api/video_to_data.py`
+- 本地 Web UI
+- Docker 优先的一键部署方式
+- 任务持久化、批量提交和结果打包下载
 
-Use this repository when you want a teammate to run GVHMR as a tool instead of as a research demo.
+## 这个仓库适合做什么
 
-Typical workflow:
+如果你希望把 GVHMR 当成“工具”而不是“研究 demo”来使用，这个仓库就是为这个场景准备的。
 
-1. Start the Web service.
-2. Upload one or more videos.
-3. Download `NPZ + JSON` results.
-4. Optionally download preview videos.
+典型使用流程：
 
-## One-Click Deploy
+1. 启动 Web 服务
+2. 上传一个或多个视频
+3. 下载 `NPZ + JSON` 结果
+4. 按需下载预览视频
 
-This is the recommended way to run the project on another machine.
+## 一键部署
 
-### Supported Runtime
+这是目前最推荐的运行方式。
+
+### 支持的运行环境
 
 - Linux `x86_64`
 - NVIDIA GPU
-- NVIDIA driver installed
-- Docker installed
-- NVIDIA Container Toolkit installed
+- 已安装 NVIDIA 驱动
+- 已安装 Docker
+- 已安装 NVIDIA Container Toolkit
 
-### Start
+### 启动
 
-From the repository root:
+在仓库根目录执行：
 
 ```bash
 bash start_web.sh
 ```
 
-The Web UI will be served at:
+默认访问地址：
 
 ```text
 http://127.0.0.1:7860/ui
 ```
 
-### LAN Access
+### 局域网访问
 
-To expose the service to other devices on the same network:
+如果希望同一局域网内的其他设备访问：
 
 ```bash
 bash start_web_lan.sh
 ```
 
-### Status And Stop
+### 查看状态与停止服务
 
 ```bash
 bash status.sh
 bash stop_web.sh
 ```
 
-### First Launch
+### 首次启动会做什么
 
-On the first launch, the scripts will:
+首次启动时，脚本会自动：
 
-- build the Docker image
-- check CUDA visibility inside the container
-- create `runtime/checkpoints`, `runtime/jobs`, `runtime/batches`, and `runtime/db`
-- download the required model assets into `runtime/checkpoints`
+- 构建 Docker 镜像
+- 检查容器内 CUDA 是否可用
+- 创建 `runtime/checkpoints`、`runtime/jobs`、`runtime/batches`、`runtime/db`
+- 把必需模型下载到 `runtime/checkpoints`
 
-Subsequent launches reuse the same image and checkpoints.
+后续再次启动时，会直接复用已有镜像和权重。
 
-## Local Source Mode
+## 本地源码模式
 
-If you are developing the project locally instead of using Docker:
+如果你是在本地做开发，而不是走 Docker 部署：
 
 ```bash
 pip install -r requirements-ui.txt
 python tools/app/run_ui.py
 ```
 
-The source-mode UI is mainly for development. For teammate-facing deployment, prefer `start_web.sh`.
+源码模式主要用于开发调试。给同事或其他使用者部署时，优先推荐 `start_web.sh`。
 
-## Outputs
+## 输出内容
 
-Each job writes results under `runtime/jobs`.
+每个任务的结果会写到 `runtime/jobs` 下。
 
-Core outputs:
+核心输出：
 
 - `gvhmr_data.npz`
 - `gvhmr_meta.json`
 - `hmr4d_results.pt`
 
-Optional outputs:
+可选输出：
 
 - `1_incam.mp4`
 - `2_global.mp4`
 - `*_3_incam_global_horiz.mp4`
 
-## Data Format
+## 数据格式
 
-`gvhmr_data.npz` contains flattened arrays such as:
+`gvhmr_data.npz` 中会包含类似这些扁平字段：
 
 - `smpl_global_body_pose`
 - `smpl_global_global_orient`
@@ -118,57 +120,57 @@ Optional outputs:
 - `smpl_incam_betas`
 - `camera_K_fullimg`
 
-`gvhmr_meta.json` contains job metadata such as:
+`gvhmr_meta.json` 里会记录任务元信息，例如：
 
-- source video path
-- source resolution and fps
-- processed frame count
-- processed fps
+- 源视频路径
+- 源视频分辨率和 fps
+- 处理后帧数
+- 处理后 fps
 - `static_cam`
 - `f_mm`
-- output directory
+- 输出目录
 - `person_mode = "single_primary_track"`
 
-## Repository Layout
+## 仓库结构
 
 - `hmr4d/api/`
-  Reusable API layer for `video -> data`.
+  视频转结构化数据的 API 层
 - `hmr4d/service/`
-  Job manager, persistence, service entrypoint, and Web UI.
+  任务管理、持久化、服务入口和 Web UI
 - `tools/app/run_ui.py`
-  Source-mode launcher for local development.
+  本地源码模式启动入口
 - `start_web.sh`
-  One-click local Docker start.
+  本机 Docker 一键启动
 - `start_web_lan.sh`
-  One-click LAN-facing Docker start.
+  局域网可访问的一键启动
 
-## Important Notes
+## 重要说明
 
-- This project currently targets single-person main-track processing.
-- It does not support CPU inference.
-- `inputs/`, `outputs/`, and `runtime/` are not tracked in git.
-- Docker images and model checkpoints are intentionally not committed to this repository.
+- 当前版本只面向单人主轨处理
+- 不支持 CPU 推理
+- `inputs/`、`outputs/`、`runtime/` 不纳入 git 版本管理
+- Docker 镜像和模型权重不会直接提交到仓库
 
-## Development
+## 开发环境
 
-For development environment setup:
+如果你要做开发：
 
 ```bash
 conda env create -f environment-dev.yml
 conda activate gvhmr-dev
 ```
 
-## Upstream Project
+## 上游项目
 
-This work is based on the original GVHMR project:
+本仓库基于原始 GVHMR 项目构建：
 
-- Project page: https://zju3dv.github.io/gvhmr
-- Paper: https://arxiv.org/abs/2409.06662
-- Upstream repo: https://github.com/zju3dv/GVHMR
+- 项目主页：https://zju3dv.github.io/gvhmr
+- 论文：https://arxiv.org/abs/2409.06662
+- 上游仓库：https://github.com/zju3dv/GVHMR
 
-## Citation
+## 引用
 
-If you use GVHMR itself in research, please cite the original paper:
+如果你在研究中使用的是 GVHMR 本身，请引用原论文：
 
 ```bibtex
 @inproceedings{shen2024gvhmr,
@@ -179,9 +181,9 @@ If you use GVHMR itself in research, please cite the original paper:
 }
 ```
 
-## Acknowledgement
+## 致谢
 
-Thanks to the authors of:
+感谢以下项目作者的工作：
 
 - [WHAM](https://github.com/yohanshin/WHAM)
 - [4D-Humans](https://github.com/shubham-goel/4D-Humans)
