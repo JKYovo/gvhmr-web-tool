@@ -8,9 +8,52 @@ from tqdm import tqdm
 import cv2
 
 
-def get_video_lwh(video_path):
+def _probe_video_stream(video_path):
+    probe = ffmpeg.probe(str(video_path))
+    for stream in probe.get("streams", []):
+        if stream.get("codec_type") == "video":
+            return stream
+    raise ValueError(f"No video stream found in {video_path}")
+
+
+def _get_video_rotation(video_path):
+    stream = _probe_video_stream(video_path)
+    side_data_list = stream.get("side_data_list") or []
+    for side_data in side_data_list:
+        if side_data.get("rotation") is not None:
+            return int(side_data["rotation"]) % 360
+
+    rotate_tag = (stream.get("tags") or {}).get("rotate")
+    if rotate_tag is not None:
+        return int(float(rotate_tag)) % 360
+
+    return 0
+
+
+def get_video_lwh(video_path, display_oriented=False):
     L, H, W, _ = iio.improps(video_path, plugin="pyav").shape
+    if display_oriented and _get_video_rotation(video_path) in {90, 270}:
+        W, H = H, W
     return L, W, H
+
+
+def transcode_video_normalized(video_path, out_video_path, fps=30, crf=17):
+    video_path = Path(video_path)
+    out_video_path = Path(out_video_path)
+
+    stream = ffmpeg.input(str(video_path))
+    stream = ffmpeg.filter(stream, "fps", fps=fps)
+    output = ffmpeg.output(
+        stream,
+        str(out_video_path),
+        vcodec="libx264",
+        pix_fmt="yuv420p",
+        crf=crf,
+        an=None,
+        movflags="+faststart",
+        map_metadata="-1",
+    )
+    ffmpeg.run(output, overwrite_output=True, quiet=True)
 
 
 def read_video_np(video_path, start_frame=0, end_frame=-1, scale=1.0):

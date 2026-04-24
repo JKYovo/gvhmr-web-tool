@@ -1,0 +1,6 @@
+gradio>=4.44,<5
+huggingface_hub>=0.19.3,<1.0
+pydantic>=2.7,<2.10
+fastapi>=0.112,<0.113
+starlette>=0.37,<0.39
+uvicorn>=0.30,<0.31

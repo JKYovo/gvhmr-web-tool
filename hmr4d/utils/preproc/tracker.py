@@ -1,5 +1,5 @@
 from ultralytics import YOLO
-from hmr4d import PROJ_ROOT
+from hmr4d import resolve_checkpoint_path
 
 import torch
 import numpy as np
@@ -19,7 +19,7 @@ from hmr4d.utils.net_utils import moving_average_smooth
 class Tracker:
     def __init__(self) -> None:
         # https://docs.ultralytics.com/modes/predict/
-        self.yolo = YOLO(PROJ_ROOT / "inputs/checkpoints/yolo/yolov8x.pt")
+        self.yolo = YOLO(resolve_checkpoint_path("yolo", "yolov8x.pt"))
 
     def track(self, video_path):
         track_history = []
@@ -78,6 +78,8 @@ class Tracker:
 
         # parse track_history & use top1 track
         id_to_frame_ids, id_to_bbx_xyxys, id_sorted = self.sort_track_length(track_history, video_path)
+        if not id_sorted:
+            raise RuntimeError("No person was detected in the input video.")
         track_id = id_sorted[0]
         frame_ids = torch.tensor(id_to_frame_ids[track_id])  # (N,)
         bbx_xyxys = torch.tensor(id_to_bbx_xyxys[track_id])  # (N, 4)

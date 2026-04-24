@@ -1,66 +1,176 @@
-# GVHMR: World-Grounded Human Motion Recovery via Gravity-View Coordinates
-### [Project Page](https://zju3dv.github.io/gvhmr) | [Paper](https://arxiv.org/abs/2409.06662)
+# GVHMR Web Tool
 
-> World-Grounded Human Motion Recovery via Gravity-View Coordinates  
-> [Zehong Shen](https://zehongs.github.io/)<sup>\*</sup>,
-[Huaijin Pi](https://phj128.github.io/)<sup>\*</sup>,
-[Yan Xia](https://isshikihugh.github.io/scholar),
-[Zhi Cen](https://scholar.google.com/citations?user=Xyy-uFMAAAAJ),
-[Sida Peng](https://pengsida.net/)<sup>†</sup>,
-[Zechen Hu](https://zju3dv.github.io/gvhmr),
-[Hujun Bao](http://www.cad.zju.edu.cn/home/bao/),
-[Ruizhen Hu](https://csse.szu.edu.cn/staff/ruizhenhu/),
-[Xiaowei Zhou](https://xzhou.me/)  
-> SIGGRAPH Asia 2024
+This repository turns [zju3dv/GVHMR](https://github.com/zju3dv/GVHMR) into a local Web tool for:
 
-<p align="center">
-    <img src=docs/example_video/project_teaser.gif alt="animated" />
-</p>
+- uploading a video
+- running GVHMR on a single main person track
+- exporting structured motion data as `gvhmr_data.npz` and `gvhmr_meta.json`
+- optionally generating preview videos
 
-## News 🔥
+It keeps the original GVHMR inference pipeline, but adds:
 
-- [2025-03-08] By default not using DPVO. We implemented a SimpleVO, which is more efficient and compatible with GVHMR.
-- [2025-03-08] We added a new option `f_mm` to specify the focal length of the fullframe camera in mm.
+- a reusable Python API in `hmr4d/api/video_to_data.py`
+- a local Web UI
+- a Docker-first deployment path
+- job persistence, batch submission, and downloadable artifacts
 
-## Setup
+## What This Fork Is For
 
-Please see [installation](docs/INSTALL.md) for details.
+Use this repository when you want a teammate to run GVHMR as a tool instead of as a research demo.
 
-## Quick Start
+Typical workflow:
 
-### [<img src="https://i.imgur.com/QCojoJk.png" width="30"> Google Colab demo for GVHMR](https://colab.research.google.com/drive/1N9WSchizHv2bfQqkE9Wuiegw_OT7mtGj?usp=sharing)
+1. Start the Web service.
+2. Upload one or more videos.
+3. Download `NPZ + JSON` results.
+4. Optionally download preview videos.
 
-### [<img src="https://s2.loli.net/2024/09/15/aw3rElfQAsOkNCn.png" width="20"> HuggingFace demo for GVHMR](https://huggingface.co/spaces/LittleFrog/GVHMR)
+## One-Click Deploy
 
-### Demo
-Demo entries are provided in `tools/demo`. Use `-s` to skip visual odometry if you know the camera is static, otherwise the camera will be estimated by DPVO.
-We also provide a script `demo_folder.py` to inference a entire folder.
-```shell
-python tools/demo/demo.py --video=docs/example_video/tennis.mp4 -s
-python tools/demo/demo_folder.py -f inputs/demo/folder_in -d outputs/demo/folder_out -s
+This is the recommended way to run the project on another machine.
+
+### Supported Runtime
+
+- Linux `x86_64`
+- NVIDIA GPU
+- NVIDIA driver installed
+- Docker installed
+- NVIDIA Container Toolkit installed
+
+### Start
+
+From the repository root:
+
+```bash
+bash start_web.sh
 ```
 
-### Reproduce
-1. **Test**:
-To reproduce the 3DPW, RICH, and EMDB results in a single run, use the following command:
-    ```shell
-    python tools/train.py global/task=gvhmr/test_3dpw_emdb_rich exp=gvhmr/mixed/mixed ckpt_path=inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt
-    ```
-    To test individual datasets, change `global/task` to `gvhmr/test_3dpw`, `gvhmr/test_rich`, or `gvhmr/test_emdb`.
+The Web UI will be served at:
 
-2. **Train**:
-To train the model, use the following command:
-    ```shell
-    # The gvhmr_siga24_release.ckpt is trained with 2x4090 for 420 epochs, note that different GPU settings may lead to different results.
-    python tools/train.py exp=gvhmr/mixed/mixed
-    ```
-    During training, note that we do not employ post-processing as in the test script, so the global metrics results will differ (but should still be good for comparison with baseline methods).
-
-# Citation
-
-If you find this code useful for your research, please use the following BibTeX entry.
-
+```text
+http://127.0.0.1:7860/ui
 ```
+
+### LAN Access
+
+To expose the service to other devices on the same network:
+
+```bash
+bash start_web_lan.sh
+```
+
+### Status And Stop
+
+```bash
+bash status.sh
+bash stop_web.sh
+```
+
+### First Launch
+
+On the first launch, the scripts will:
+
+- build the Docker image
+- check CUDA visibility inside the container
+- create `runtime/checkpoints`, `runtime/jobs`, `runtime/batches`, and `runtime/db`
+- download the required model assets into `runtime/checkpoints`
+
+Subsequent launches reuse the same image and checkpoints.
+
+## Local Source Mode
+
+If you are developing the project locally instead of using Docker:
+
+```bash
+pip install -r requirements-ui.txt
+python tools/app/run_ui.py
+```
+
+The source-mode UI is mainly for development. For teammate-facing deployment, prefer `start_web.sh`.
+
+## Outputs
+
+Each job writes results under `runtime/jobs`.
+
+Core outputs:
+
+- `gvhmr_data.npz`
+- `gvhmr_meta.json`
+- `hmr4d_results.pt`
+
+Optional outputs:
+
+- `1_incam.mp4`
+- `2_global.mp4`
+- `*_3_incam_global_horiz.mp4`
+
+## Data Format
+
+`gvhmr_data.npz` contains flattened arrays such as:
+
+- `smpl_global_body_pose`
+- `smpl_global_global_orient`
+- `smpl_global_transl`
+- `smpl_global_betas`
+- `smpl_incam_body_pose`
+- `smpl_incam_global_orient`
+- `smpl_incam_transl`
+- `smpl_incam_betas`
+- `camera_K_fullimg`
+
+`gvhmr_meta.json` contains job metadata such as:
+
+- source video path
+- source resolution and fps
+- processed frame count
+- processed fps
+- `static_cam`
+- `f_mm`
+- output directory
+- `person_mode = "single_primary_track"`
+
+## Repository Layout
+
+- `hmr4d/api/`
+  Reusable API layer for `video -> data`.
+- `hmr4d/service/`
+  Job manager, persistence, service entrypoint, and Web UI.
+- `tools/app/run_ui.py`
+  Source-mode launcher for local development.
+- `start_web.sh`
+  One-click local Docker start.
+- `start_web_lan.sh`
+  One-click LAN-facing Docker start.
+
+## Important Notes
+
+- This project currently targets single-person main-track processing.
+- It does not support CPU inference.
+- `inputs/`, `outputs/`, and `runtime/` are not tracked in git.
+- Docker images and model checkpoints are intentionally not committed to this repository.
+
+## Development
+
+For development environment setup:
+
+```bash
+conda env create -f environment-dev.yml
+conda activate gvhmr-dev
+```
+
+## Upstream Project
+
+This work is based on the original GVHMR project:
+
+- Project page: https://zju3dv.github.io/gvhmr
+- Paper: https://arxiv.org/abs/2409.06662
+- Upstream repo: https://github.com/zju3dv/GVHMR
+
+## Citation
+
+If you use GVHMR itself in research, please cite the original paper:
+
+```bibtex
 @inproceedings{shen2024gvhmr,
   title={World-Grounded Human Motion Recovery via Gravity-View Coordinates},
   author={Shen, Zehong and Pi, Huaijin and Xia, Yan and Cen, Zhi and Peng, Sida and Hu, Zechen and Bao, Hujun and Hu, Ruizhen and Zhou, Xiaowei},
@@ -69,9 +179,10 @@ If you find this code useful for your research, please use the following BibTeX 
 }
 ```
 
-# Acknowledgement
+## Acknowledgement
 
-We thank the authors of
-[WHAM](https://github.com/yohanshin/WHAM),
-[4D-Humans](https://github.com/shubham-goel/4D-Humans),
-and [ViTPose-Pytorch](https://github.com/gpastal24/ViTPose-Pytorch) for their great works, without which our project/code would not be possible.
+Thanks to the authors of:
+
+- [WHAM](https://github.com/yohanshin/WHAM)
+- [4D-Humans](https://github.com/shubham-goel/4D-Humans)
+- [ViTPose-Pytorch](https://github.com/gpastal24/ViTPose-Pytorch)

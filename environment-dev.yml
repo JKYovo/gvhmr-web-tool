@@ -1,0 +1,12 @@
+name: gvhmr-dev
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - ffmpeg
+  - git
+  - pip:
+      - -r requirements.txt
+      - -r requirements-ui.txt
+      - -e .

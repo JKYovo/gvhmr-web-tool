@@ -4,6 +4,7 @@ import numpy as np
 from .vitpose_pytorch import build_model
 from .vitfeat_extractor import get_batch
 from tqdm import tqdm
+from hmr4d import resolve_checkpoint_path
 
 from hmr4d.utils.kpts.kp2d_utils import keypoints_from_heatmaps
 from hmr4d.utils.geo_transform import cvt_p2d_from_pm1_to_i
@@ -12,7 +13,7 @@ from hmr4d.utils.geo.flip_utils import flip_heatmap_coco17
 
 class VitPoseExtractor:
     def __init__(self, tqdm_leave=True):
-        ckpt_path = "inputs/checkpoints/vitpose/vitpose-h-multi-coco.pth"
+        ckpt_path = resolve_checkpoint_path("vitpose", "vitpose-h-multi-coco.pth")
         self.pose = build_model("ViTPose_huge_coco_256x192", ckpt_path)
         self.pose.cuda().eval()
 

@@ -12,11 +12,13 @@ import pickle
 
 from .smplx_lite import batch_rigid_transform_v2
 
+from hmr4d import resolve_checkpoint_path
+
 
 class SmplLite(nn.Module):
     def __init__(
         self,
-        model_path="inputs/checkpoints/body_models/smpl",
+        model_path=resolve_checkpoint_path("body_models", "smpl"),
         gender="neutral",
         num_betas=10,
     ):

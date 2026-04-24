@@ -2,6 +2,8 @@
 .hydra
 inputs
 outputs
+runtime
+gvhmr.egg-info
 
 # All file or folders start with tmp will be ignored
 tmp*  
