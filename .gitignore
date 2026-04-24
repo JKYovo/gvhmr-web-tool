@@ -136,6 +136,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+!deploy/env/
+!deploy/env/*.yml
+!deploy/env/*.txt
 
 # Spyder project settings
 .spyderproject
