@@ -114,6 +114,8 @@ class SQLiteJobStore:
         return {
             "job_id": job["job_id"],
             "status": job["status"],
+            "display_name": job.get("display_name"),
+            "source_video_path": job.get("source_video_path"),
             "input_video": job["input_video"],
             "submitted_at": job["submitted_at"],
             "started_at": job.get("started_at"),

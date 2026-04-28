@@ -62,6 +62,7 @@ class JobManager:
         save_intermediate=False,
         generate_preview=False,
         batch_id=None,
+        display_name=None,
     ):
         video_source = Path(video_source).expanduser().resolve()
         if not video_source.exists():
@@ -78,6 +79,7 @@ class JobManager:
             "task_kind": "process",
             "source_video_path": str(video_source),
             "input_video": str(staged_input),
+            "display_name": display_name or video_source.name,
             "submitted_at": utc_now_iso(),
             "started_at": None,
             "finished_at": None,

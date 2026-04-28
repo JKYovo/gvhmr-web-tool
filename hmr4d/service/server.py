@@ -58,6 +58,7 @@ class JobCreateRequest(BaseModel):
     f_mm: int | None = None
     save_intermediate: bool = False
     generate_preview: bool = False
+    display_name: str | None = None
 
 
 class BatchCreateRequest(BaseModel):

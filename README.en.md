@@ -15,6 +15,8 @@ It keeps the original GVHMR inference pipeline, but adds:
 - a local Web UI
 - a Docker-first deployment path
 - job persistence, batch submission, and downloadable artifacts
+- a compact job history page with copyable `job_id` fields and download buttons
+- optional handoff from successful GVHMR jobs to GMR for ELF3 retargeting when both services are mounted by the local Motion Portal
 
 ## What This Fork Is For
 
@@ -26,6 +28,17 @@ Typical workflow:
 2. Upload one or more videos.
 3. Download `NPZ + JSON` results.
 4. Optionally download preview videos.
+5. If GMR Web is available in the same local portal, submit `hmr4d_results.pt` to ELF3 retargeting.
+
+## Web UI Features
+
+The current Web UI includes:
+
+- Single-video processing from upload or server-side path.
+- Batch processing from multiple uploads or a server-side directory.
+- Compact job history with readable file names, copyable `job_id`, previews, and download buttons.
+- Folded logs and full job details for debugging without making the main page too long.
+- Optional "Convert to ELF3" handoff when the GVHMR UI is mounted together with GMR Web.
 
 ## One-Click Deploy
 
