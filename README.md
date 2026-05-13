@@ -2,7 +2,7 @@
 
 [English README](README.en.md)
 
-这个仓库在原始 [zju3dv/GVHMR](https://github.com/zju3dv/GVHMR) 的基础上，做了一个更适合团队内部使用的本地 Web 工具，用于：
+这个仓库在原始 [zju3dv/GVHMR](https://github.com/zju3dv/GVHMR) 的基础上，做了一个更适合团队内部使用的本地 Web 工具， 用于：
 
 - 上传视频
 - 运行 GVHMR 单人主轨推理
