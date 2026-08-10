@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GVHMR Web</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%23111827'/%3E%3Cpath d='M13 19h16v7H20v12h9v7H13V19Zm22 0h7l4 14 4-14h7l-8 26h-6l-8-26Z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="static/styles.css?v=20260810-ground2">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1>GVHMR Web</h1>
+        <p>从单人视频恢复世界坐标人体动作，结果统一保存在任务目录。</p>
+      </div>
+      <div class="badges" id="capabilityBadges" aria-label="运行环境状态">
+        <span class="badge">正在检查环境</span>
+      </div>
+    </header>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <section class="layout">
+      <div class="left">
+        <section class="panel process-panel">
+          <div class="panel-head compact-head">
+            <div>
+              <h2>视频处理</h2>
+              <p>选择视频并提交 GVHMR 推理。</p>
+            </div>
+            <div class="mode-tabs" role="tablist" aria-label="处理模式">
+              <button class="mode-tab active" type="button" data-mode-tab="single" aria-selected="true" aria-controls="singleModePanel">单视频</button>
+              <button class="mode-tab" type="button" data-mode-tab="batch" aria-selected="false" aria-controls="batchModePanel">批量</button>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="singleModePanel" data-mode-panel="single" role="tabpanel">
+            <form id="singleForm" class="form-grid">
+              <label class="file-drop">
+                <span class="field-title">输入视频</span>
+                <input id="singleFile" type="file" name="file" accept=".mp4,.mov,.avi,.mkv,.webm" required>
+                <small>支持 mp4 / mov / avi / mkv / webm</small>
+              </label>
+              <div class="form-section">
+                <div class="section-title"><span>推理设置</span><small>通常保持默认即可</small></div>
+                <div class="fields">
+                  <label>焦距 f_mm<input name="f_mm" type="number" step="1" min="1" placeholder="自动估计"></label>
+                  <label class="switch-row"><input name="static_cam" type="checkbox" checked><span>静态相机</span><small>固定机位建议开启</small></label>
+                </div>
+                <fieldset class="ground-fieldset">
+                  <legend>地面约束</legend>
+                  <div class="ground-options">
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="none"><span>不启用</span><small>保留原始 FootMR root</small></label>
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="flat_y" checked><span>自动平地约束</span><small>默认；保护失败自动回退</small></label>
+                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束</span><small>尚未启用</small></label>
+                  </div>
+                </fieldset>
+              </div>
+              <div class="submit-row">
+                <div class="output-note"><strong>保存位置</strong><span>runtime/jobs / 视频名_任务编号</span></div>
+                <button id="singleSubmit" class="primary" type="submit">提交视频处理</button>
+              </div>
+              <div class="form-feedback" id="singleFormFeedback" hidden></div>
+            </form>
+          </div>
+
+          <div class="tab-panel" id="batchModePanel" data-mode-panel="batch" role="tabpanel" hidden>
+            <form id="batchForm" class="form-grid">
+              <label class="file-drop">
+                <span class="field-title">输入视频</span>
+                <input id="batchFiles" type="file" name="files" accept=".mp4,.mov,.avi,.mkv,.webm" multiple required>
+                <small>每个视频创建独立任务，单个文件失败不会影响其他文件</small>
+              </label>
+              <div class="form-section">
+                <div class="section-title"><span>统一设置</span><small>应用到本次所有视频</small></div>
+                <div class="fields">
+                  <label>焦距 f_mm<input name="f_mm" type="number" step="1" min="1" placeholder="自动估计"></label>
+                  <label class="switch-row"><input name="static_cam" type="checkbox" checked><span>静态相机</span><small>固定机位建议开启</small></label>
+                </div>
+                <fieldset class="ground-fieldset">
+                  <legend>地面约束</legend>
+                  <div class="ground-options">
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="none"><span>不启用</span><small>保留原始 FootMR root</small></label>
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="flat_y" checked><span>自动平地约束</span><small>默认；保护失败自动回退</small></label>
+                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束</span><small>尚未启用</small></label>
+                  </div>
+                </fieldset>
+              </div>
+              <div class="submit-row">
+                <div class="output-note"><strong>保存位置</strong><span>runtime/jobs / 各视频名_任务编号</span></div>
+                <button id="batchSubmit" class="primary" type="submit">提交批量处理</button>
+              </div>
+              <div class="form-feedback" id="batchFormFeedback" hidden></div>
+            </form>
+          </div>
+        </section>
+      </div>
+
+      <aside class="right">
+        <section class="panel task-console">
+          <div class="panel-head">
+            <div>
+              <h2>任务控制台</h2>
+              <p>查看最近任务及处理状态。</p>
+            </div>
+            <button id="refreshJobs" class="ghost" type="button">刷新</button>
+          </div>
+          <div class="filters">
+            <input id="searchBox" type="search" placeholder="搜索视频名 / job_id">
+            <select id="statusFilter">
+              <option value="all">全部状态</option>
+              <option value="queued">等待中</option>
+              <option value="running">处理中</option>
+              <option value="succeeded">已完成</option>
+              <option value="failed">失败</option>
+              <option value="cancelled">已取消</option>
+            </select>
+          </div>
+          <div class="job-list" id="jobList"></div>
+        </section>
+      </aside>
+
+      <section class="panel detail-panel" id="detailPanel">
+        <div class="panel-head detail-head">
+          <div>
+            <h2>任务详情</h2>
+            <p id="detailHint">选择任务查看结果、预览和日志。</p>
+          </div>
+          <button id="openFolderBtn" class="ghost" type="button" disabled>打开任务文件夹</button>
+        </div>
+
+        <div class="detail-content">
+          <div class="preview-slot" id="previewSlot">
+            <section class="preview-stage" id="previewStage" aria-label="任务预览">
+              <video id="previewVideo" controls preload="metadata" hidden></video>
+              <div class="preview-empty" id="previewEmpty">
+                <strong>暂无预览</strong>
+                <span>推理完成后可按需生成对比视频</span>
+              </div>
+            </section>
+          </div>
+
+          <div class="detail-summary">
+            <div class="metrics" id="jobMetrics"></div>
+            <div class="task-progress detail-progress" id="jobProgress" hidden>
+              <div class="task-progress-head">
+                <span id="jobProgressStage">等待 GPU</span>
+                <strong id="jobProgressPercent">0%</strong>
+              </div>
+              <div class="progress-track" id="jobProgressTrack" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <span id="jobProgressBar"></span>
+              </div>
+            </div>
+            <div class="detail-actions">
+              <button id="previewBtn" class="primary" type="button" hidden>生成预览</button>
+              <button id="retryBtn" type="button" hidden>重试任务</button>
+              <button id="cancelBtn" type="button" hidden>取消任务</button>
+              <button id="toGmrBtn" type="button" hidden>转 ELF3</button>
+            </div>
+            <div class="detail-action-hint" id="detailActionHint">选择任务后显示下一步操作。</div>
+          </div>
+        </div>
+
+        <div class="detail-secondary">
+          <details>
+            <summary id="downloadsSummary">结果下载</summary>
+            <div class="download-grid" id="downloads"></div>
+          </details>
+          <details>
+            <summary>完整路径</summary>
+            <div class="path-list" id="jobPaths"></div>
+          </details>
+          <details>
+            <summary>任务日志</summary>
+            <pre id="logs"></pre>
+          </details>
+          <details>
+            <summary>任务 JSON</summary>
+            <pre id="jobJson"></pre>
+          </details>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="static/app.js?v=20260810-ground2"></script>
+</body>
+</html>

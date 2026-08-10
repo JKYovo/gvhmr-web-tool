@@ -14,4 +14,4 @@ ensure_required_commands
 ensure_docker_ready
 docker_service_status
 echo
-echo "Expected Web URL: http://127.0.0.1:${PORT}/ui"
+echo "Expected Web URL: http://127.0.0.1:${PORT}/"

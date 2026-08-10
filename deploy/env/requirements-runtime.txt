@@ -15,6 +15,9 @@ hydra_colorlog
 rich
 
 # Common runtime utilities
+fastapi
+uvicorn
+python-multipart
 numpy==1.23.5
 matplotlib
 setuptools>=68.0

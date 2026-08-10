@@ -4,6 +4,9 @@ GVHMR_IMAGE_NAME="${GVHMR_IMAGE_NAME:-gvhmr-web:latest}"
 GVHMR_CONTAINER_NAME="${GVHMR_CONTAINER_NAME:-gvhmr-web}"
 DOCKER_COMPOSE_FILE="${ROOT_DIR}/deploy/docker/docker-compose.yml"
 GVHMR_DOCKER_USE_SUDO="${GVHMR_DOCKER_USE_SUDO:-0}"
+GVHMR_DOCKER_UID="${GVHMR_DOCKER_UID:-$(id -u)}"
+GVHMR_DOCKER_GID="${GVHMR_DOCKER_GID:-$(id -g)}"
+export GVHMR_DOCKER_UID GVHMR_DOCKER_GID
 
 docker_cli() {
   if [ "${GVHMR_DOCKER_USE_SUDO}" = "1" ]; then
@@ -70,8 +73,12 @@ docker_run_oneoff() {
     docker_compose_cmd run --rm --no-deps gvhmr-web "$@"
   else
     docker_cli run --rm \
+      --user "${GVHMR_DOCKER_UID}:${GVHMR_DOCKER_GID}" \
       --gpus all \
       --shm-size 8g \
+      -e HOME=/tmp \
+      -e XDG_CACHE_HOME=/tmp/.cache \
+      -e MPLCONFIGDIR=/tmp/matplotlib \
       -e GVHMR_HOST=0.0.0.0 \
       -e GVHMR_PORT="${GVHMR_PORT}" \
       -e GVHMR_CHECKPOINT_ROOT=/app/runtime/checkpoints \
@@ -95,9 +102,13 @@ docker_start_service() {
     fi
     docker_cli run -d \
       --name "$GVHMR_CONTAINER_NAME" \
+      --user "${GVHMR_DOCKER_UID}:${GVHMR_DOCKER_GID}" \
       --gpus all \
       --shm-size 8g \
       -p "${GVHMR_PORT_BIND}" \
+      -e HOME=/tmp \
+      -e XDG_CACHE_HOME=/tmp/.cache \
+      -e MPLCONFIGDIR=/tmp/matplotlib \
       -e GVHMR_HOST=0.0.0.0 \
       -e GVHMR_PORT="${GVHMR_PORT}" \
       -e GVHMR_CHECKPOINT_ROOT=/app/runtime/checkpoints \

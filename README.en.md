@@ -2,256 +2,95 @@
 
 [简体中文 README](README.md)
 
-This repository turns [zju3dv/GVHMR](https://github.com/zju3dv/GVHMR) into a local Web tool for:
+This repository packages the single-person motion recovery pipeline from [GVHMR](https://github.com/zju3dv/GVHMR) as a deployable local Web tool. Users can upload one video or a batch, inspect persistent jobs, download `hmr4d_results.pt`, and generate camera/world-view previews when needed.
 
-- uploading a video
-- running GVHMR on a single main person track
-- exporting structured motion data as `gvhmr_data.npz` and `gvhmr_meta.json`
-- optionally generating preview videos
+![GVHMR Web interface](docs/images/gvhmr-web.png)
 
-It keeps the original GVHMR inference pipeline, but adds:
+## Features
 
-- a reusable Python API in `hmr4d/api/video_to_data.py`
-- a local Web UI
-- a Docker-first deployment path
-- job persistence, batch submission, and downloadable artifacts
-- a compact job history page with copyable `job_id` fields and download buttons
-- optional handoff from successful GVHMR jobs to GMR for ELF3 retargeting when both services are mounted by the local Motion Portal
+- Single and batch upload for `mp4 / mov / avi / mkv / webm`
+- Static-camera mode and optional focal length `f_mm`
+- SQLite-backed job history, filtering, cancellation, and retry
+- On-demand previews whose failures do not invalidate motion results
+- In-page preview playback and separate PT, camera-view, global-view, and ZIP downloads
+- Automatic upload cleanup with task inputs and outputs kept together
+- Docker-first deployment plus a source-mode workflow for development
 
-## What This Fork Is For
+## Workflow
 
-Use this repository when you want a teammate to run GVHMR as a tool instead of as a research demo.
+1. Upload video and submit GVHMR inference.
+2. Follow progress in the job console and retry failed jobs when appropriate.
+3. Download `hmr4d_results.pt`, or generate a preview to inspect the recovered motion.
 
-Typical workflow:
+## Quick Start
 
-1. Start the Web service.
-2. Upload one or more videos.
-3. Download `NPZ + JSON` results.
-4. Optionally download preview videos.
-5. If GMR Web is available in the same local portal, submit `hmr4d_results.pt` to ELF3 retargeting.
-
-## Web UI Features
-
-The current Web UI includes:
-
-- Single-video processing from upload or server-side path.
-- Batch processing from multiple uploads or a server-side directory.
-- Compact job history with readable file names, copyable `job_id`, previews, and download buttons.
-- Folded logs and full job details for debugging without making the main page too long.
-- Optional "Convert to ELF3" handoff when the GVHMR UI is mounted together with GMR Web.
-
-## One-Click Deploy
-
-This is the recommended way to run the project on another machine.
-
-### Supported Runtime
-
-- Linux `x86_64`
-- NVIDIA GPU
-- NVIDIA driver installed
-- Docker installed
-- NVIDIA Container Toolkit installed
-
-### Environment Doctor
-
-You can run a standalone environment check first:
+The supported runtime is Linux x86_64 with an NVIDIA GPU, a working driver, Docker, and NVIDIA Container Toolkit.
 
 ```bash
 bash doctor.sh
-```
-
-On Ubuntu / Debian, you can also ask the scripts to attempt automatic repair:
-
-```bash
-bash doctor.sh --fix
-```
-
-Current `--fix` coverage:
-
-- install Docker
-- start `docker.service`
-- install and configure NVIDIA Container Toolkit
-
-For safety, the scripts do not attempt to install an NVIDIA driver. If `nvidia-smi` is unavailable, the doctor exits early and asks the user to install the driver first.
-
-### Start
-
-From the repository root:
-
-```bash
 bash start_web.sh
 ```
 
-To attempt environment repair before launch:
-
-```bash
-bash start_web.sh --fix
-```
-
-The Web UI will be served at:
+Open:
 
 ```text
-http://127.0.0.1:7860/ui
+http://127.0.0.1:7860/
 ```
 
-### LAN Access
-
-To expose the service to other devices on the same network:
-
-```bash
-bash start_web_lan.sh
-```
-
-This also supports:
-
-```bash
-bash start_web_lan.sh --fix
-```
-
-### Status And Stop
+Check status or stop the service with:
 
 ```bash
 bash status.sh
 bash stop_web.sh
 ```
 
-### First Launch
-
-On the first launch, the scripts will:
-
-- check the host environment
-- build the Docker image
-- check CUDA visibility inside the container
-- create `runtime/checkpoints`, `runtime/jobs`, `runtime/batches`, and `runtime/db`
-- download the required model assets into `runtime/checkpoints`
-
-Subsequent launches reuse the same image and checkpoints.
-
-### How Long Does First-Time Deployment Usually Take?
-
-On a clean machine, the first deployment mainly downloads two chunks:
-
-- Docker runtime image and Python dependencies, about `11GB`
-- model assets, about `5.6GB`
-
-That means a realistic first-time transfer is roughly `16GB ~ 17GB`.
-
-Typical real-world estimates:
-
-- faster network: about `30 ~ 60` minutes
-- average network: about `45 ~ 90` minutes
-- slower or unstable network: about `1 ~ 3` hours
-
-The slowest stages are usually the Docker `pip install` layer and the later `HMR2` / `ViTPose` checkpoint downloads.
-
-The startup scripts now print the current phase explicitly, for example:
-
-- building / reusing the Docker runtime image
-- checking CUDA inside the container
-- downloading / reusing model assets
-
-## Local Source Mode
-
-If you are developing the project locally instead of using Docker:
-
-```bash
-pip install -r deploy/env/requirements-ui.txt
-python tools/app/run_ui.py
-```
-
-The source-mode UI is mainly for development. For teammate-facing deployment, prefer `start_web.sh`.
+The first launch builds the Docker image and downloads model assets, for a total transfer of roughly `16GB to 17GB`. See the [quick-start guide](docs/QUICKSTART.md) and [deployment guide](docs/DEPLOYMENT.md) for details.
 
 ## Outputs
 
-Each job writes results under `runtime/jobs`.
+Each task is stored under:
 
-Core outputs:
+```text
+runtime/jobs/<video-name>_<short-job-id>/
+```
 
-- `gvhmr_data.npz`
-- `gvhmr_meta.json`
-- `hmr4d_results.pt`
+Core artifacts:
 
-Optional outputs:
+- `hmr4d_results.pt`: GVHMR motion result
+- `job.json`: job summary
+- `artifacts.zip`: bundle of currently available outputs
+
+On-demand previews:
 
 - `1_incam.mp4`
 - `2_global.mp4`
 - `*_3_incam_global_horiz.mp4`
 
-## Data Format
+`submitted_input.*`, `0_input_video.mp4`, and `_gvhmr_work/` are task inputs or working files rather than stable interchange formats.
 
-`gvhmr_data.npz` contains flattened arrays such as:
+## Documentation
 
-- `smpl_global_body_pose`
-- `smpl_global_global_orient`
-- `smpl_global_transl`
-- `smpl_global_betas`
-- `smpl_incam_body_pose`
-- `smpl_incam_global_orient`
-- `smpl_incam_transl`
-- `smpl_incam_betas`
-- `camera_K_fullimg`
+- [Quick start](docs/QUICKSTART.md)
+- [Docker and LAN deployment](docs/DEPLOYMENT.md)
+- [Source development environment](docs/INSTALL.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-`gvhmr_meta.json` contains job metadata such as:
+## Current Scope
 
-- source video path
-- source resolution and fps
-- processed frame count
-- processed fps
-- `static_cam`
-- `f_mm`
-- output directory
-- `person_mode = "single_primary_track"`
+- The service processes one primary person track and does not manage multiple identities.
+- GVHMR inference requires CUDA; CPU inference is not supported.
+- The default Web service is standalone and does not depend on GMR Web.
+- `runtime/`, model checkpoints, and Docker images are intentionally excluded from Git.
 
-## Repository Layout
+## Upstream And Citation
 
-- `deploy/docker/`
-  Dockerfile and Compose configuration.
-- `deploy/env/`
-  Runtime and development environment dependency files.
-- `deploy/scripts/`
-  Actual deployment script implementations.
-- root `doctor.sh` / `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
-  Thin convenience wrappers for end users.
-- `hmr4d/api/`
-  Reusable API layer for `video -> data`.
-- `hmr4d/service/`
-  Job manager, persistence, service entrypoint, and Web UI.
-- `tools/app/run_ui.py`
-  Source-mode launcher for local development.
-- `start_web.sh`
-  One-click local Docker start.
-- `start_web_lan.sh`
-  One-click LAN-facing Docker start.
-- `doctor.sh`
-  Environment check and optional auto-fix entrypoint.
-
-## Important Notes
-
-- This project currently targets single-person main-track processing.
-- It does not support CPU inference.
-- `inputs/`, `outputs/`, and `runtime/` are not tracked in git.
-- Docker images and model checkpoints are intentionally not committed to this repository.
-
-## Development
-
-For development environment setup:
-
-```bash
-conda env create -f deploy/env/environment-dev.yml
-conda activate gvhmr-dev
-```
-
-## Upstream Project
-
-This work is based on the original GVHMR project:
+This tool is based on the original GVHMR project:
 
 - Project page: https://zju3dv.github.io/gvhmr
 - Paper: https://arxiv.org/abs/2409.06662
-- Upstream repo: https://github.com/zju3dv/GVHMR
+- Upstream repository: https://github.com/zju3dv/GVHMR
 
-## Citation
-
-If you use GVHMR itself in research, please cite the original paper:
+Please cite the original paper when using GVHMR research results:
 
 ```bibtex
 @inproceedings{shen2024gvhmr,
@@ -261,11 +100,3 @@ If you use GVHMR itself in research, please cite the original paper:
   year={2024}
 }
 ```
-
-## Acknowledgement
-
-Thanks to the authors of:
-
-- [WHAM](https://github.com/yohanshin/WHAM)
-- [4D-Humans](https://github.com/shubham-goel/4D-Humans)
-- [ViTPose-Pytorch](https://github.com/gpastal24/ViTPose-Pytorch)

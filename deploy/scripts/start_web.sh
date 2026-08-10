@@ -116,6 +116,6 @@ step_note "[5/5] Starting GVHMR Web service..."
 docker_start_service
 wait_for_health >/dev/null
 
-URL="http://127.0.0.1:${PORT}/ui"
+URL="http://127.0.0.1:${PORT}/"
 echo "GVHMR Web is ready at ${URL}"
 open_browser "$URL"

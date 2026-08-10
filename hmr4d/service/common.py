@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import sys
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,6 +34,23 @@ def ensure_dir(path):
     return path
 
 
+def create_dated_output_dir(root, source_name, now=None):
+    root = ensure_dir(root)
+    stem = Path(source_name or "video").stem.strip() or "video"
+    stem = "".join(char if char.isalnum() or char in "._-" else "_" for char in stem)
+    stamp = (now or datetime.now().astimezone()).strftime("%Y%m%d_%H%M%S")
+    base = root / f"{stem}_{stamp}"
+    candidate = base
+    version = 2
+    while True:
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            candidate = root / f"{base.name}_{version}"
+            version += 1
+
+
 def resolve_runtime_path(path_like, *, default):
     value = os.environ.get(path_like) if isinstance(path_like, str) else None
     if value:
@@ -49,6 +67,8 @@ class ServiceSettings:
     host: str
     port: int
     sync_assets_on_boot: bool
+    core_root: Path | None = None
+    core_python: str | None = None
 
     @classmethod
     def from_env(cls):
@@ -67,6 +87,9 @@ class ServiceSettings:
         host = os.environ.get("GVHMR_HOST", "127.0.0.1")
         port = int(os.environ.get("GVHMR_PORT", "7860"))
         sync_assets_on_boot = os.environ.get("GVHMR_SYNC_ASSETS_ON_BOOT", "0") == "1"
+        core_root_value = os.environ.get("GVHMR_CORE_ROOT", "").strip()
+        core_root = Path(core_root_value).expanduser().resolve() if core_root_value else None
+        core_python = os.environ.get("GVHMR_CORE_PYTHON", "").strip() or sys.executable
         return cls(
             checkpoint_root=checkpoint_root,
             output_root=output_root,
@@ -75,6 +98,8 @@ class ServiceSettings:
             host=host,
             port=port,
             sync_assets_on_boot=sync_assets_on_boot,
+            core_root=core_root,
+            core_python=core_python,
         )
 
     def ensure_runtime_dirs(self):

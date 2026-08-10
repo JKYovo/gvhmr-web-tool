@@ -5,9 +5,13 @@ services:
       dockerfile: deploy/docker/Dockerfile
     image: gvhmr-web:latest
     container_name: gvhmr-web
+    user: "${GVHMR_DOCKER_UID:-1000}:${GVHMR_DOCKER_GID:-1000}"
     gpus: all
     shm_size: "8gb"
     environment:
+      HOME: "/tmp"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      MPLCONFIGDIR: "/tmp/matplotlib"
       GVHMR_HOST: "0.0.0.0"
       GVHMR_PORT: "${GVHMR_PORT:-7860}"
       GVHMR_CHECKPOINT_ROOT: "/app/runtime/checkpoints"

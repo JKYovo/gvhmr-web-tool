@@ -48,14 +48,23 @@ class SQLiteJobStore:
 
     def _recover_unfinished_records(self):
         with self._lock, self._connect() as conn:
-            rows = conn.execute("SELECT payload_json FROM jobs WHERE status IN ('queued', 'running')").fetchall()
+            rows = conn.execute("SELECT payload_json FROM jobs").fetchall()
             for row in rows:
                 job = json.loads(row["payload_json"])
-                job["status"] = "failed"
-                job["finished_at"] = utc_now_iso()
-                job["error_summary"] = "Service restarted before the job completed."
-                job["updated_at"] = utc_now_iso()
-                self._save_job(conn, job)
+                changed = False
+                if job["status"] in {"queued", "running"}:
+                    job["status"] = "failed"
+                    job["finished_at"] = utc_now_iso()
+                    job["error_summary"] = "Service restarted before the job completed."
+                    changed = True
+                if job.get("preview_status") in {"queued", "running"}:
+                    job["task_kind"] = "process"
+                    job["preview_status"] = "failed"
+                    job["preview_error_summary"] = "Service restarted before preview generation completed."
+                    changed = True
+                if changed:
+                    job["updated_at"] = utc_now_iso()
+                    self._save_job(conn, job)
             conn.commit()
 
     def _save_job(self, conn, job):
@@ -102,13 +111,21 @@ class SQLiteJobStore:
 
     def _write_job_manifest(self, job):
         output_dir = Path(job["output_dir"])
-        ensure_dir(output_dir)
-        write_json(output_dir / "job.json", self._public_job(job))
+        try:
+            ensure_dir(output_dir)
+            write_json(output_dir / "job.json", self._public_job(job))
+        except OSError:
+            # The SQLite record remains authoritative when a Docker or legacy
+            # absolute path is no longer mounted in the current runtime.
+            return
 
     def _write_batch_manifest(self, batch):
         batch_dir = Path(batch["batch_dir"])
-        ensure_dir(batch_dir)
-        write_json(batch_dir / "batch.json", self._public_batch(batch))
+        try:
+            ensure_dir(batch_dir)
+            write_json(batch_dir / "batch.json", self._public_batch(batch))
+        except OSError:
+            return
 
     def _public_job(self, job):
         return {
@@ -124,6 +141,8 @@ class SQLiteJobStore:
             "f_mm": job["f_mm"],
             "save_intermediate": job["save_intermediate"],
             "generate_preview": job["generate_preview"],
+            "preview_status": job.get("preview_status", "not_requested"),
+            "preview_error_summary": job.get("preview_error_summary"),
             "output_dir": job["output_dir"],
             "artifacts": job.get("artifacts", {}),
             "error_summary": job.get("error_summary"),

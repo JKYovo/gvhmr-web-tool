@@ -112,5 +112,5 @@ wait_for_health >/dev/null
 
 LAN_IP="$(hostname -I | awk '{print $1}')"
 echo "GVHMR Web is ready."
-echo "Local URL: http://127.0.0.1:${PORT}/ui"
-echo "LAN URL:   http://${LAN_IP}:${PORT}/ui"
+echo "Local URL: http://127.0.0.1:${PORT}/"
+echo "LAN URL:   http://${LAN_IP}:${PORT}/"

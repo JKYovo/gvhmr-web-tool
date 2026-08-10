@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import shutil
@@ -40,8 +39,6 @@ from hmr4d.utils.vis.renderer import Renderer, get_global_cameras_static, get_gr
 
 CRF = 23
 PROCESSED_FPS = 30
-SCHEMA_VERSION = 1
-PRIMARY_PERSON_MODE = "single_primary_track"
 _REQUIRED_CHECKPOINTS = (
     ("GVHMR checkpoint", ("gvhmr", "gvhmr_siga24_release.ckpt")),
     ("SMPL body model", ("body_models", "smpl", "SMPL_NEUTRAL.pkl")),
@@ -50,6 +47,22 @@ _REQUIRED_CHECKPOINTS = (
     ("ViTPose checkpoint", ("vitpose", "vitpose-h-multi-coco.pth")),
     ("YOLO checkpoint", ("yolo", "yolov8x.pt")),
 )
+
+
+def _ensure_chumpy_numpy_compat():
+    # Chumpy 0.70 imports NumPy aliases removed in NumPy 2.x.
+    aliases = {
+        "bool": bool,
+        "int": int,
+        "float": float,
+        "complex": complex,
+        "object": object,
+        "unicode": str,
+        "str": str,
+    }
+    for name, value in aliases.items():
+        if name not in np.__dict__:
+            setattr(np, name, value)
 
 
 class _CallbackLogHandler(logging.Handler):
@@ -103,26 +116,6 @@ def _video_metadata(video_path, *, display_oriented=False):
         "width": int(width),
         "height": int(height),
         "fps": float(fps) if fps is not None else None,
-    }
-
-
-def _tensor_to_numpy(value):
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().numpy()
-    return np.asarray(value)
-
-
-def _flatten_prediction(pred):
-    return {
-        "smpl_global_body_pose": _tensor_to_numpy(pred["smpl_params_global"]["body_pose"]),
-        "smpl_global_global_orient": _tensor_to_numpy(pred["smpl_params_global"]["global_orient"]),
-        "smpl_global_transl": _tensor_to_numpy(pred["smpl_params_global"]["transl"]),
-        "smpl_global_betas": _tensor_to_numpy(pred["smpl_params_global"]["betas"]),
-        "smpl_incam_body_pose": _tensor_to_numpy(pred["smpl_params_incam"]["body_pose"]),
-        "smpl_incam_global_orient": _tensor_to_numpy(pred["smpl_params_incam"]["global_orient"]),
-        "smpl_incam_transl": _tensor_to_numpy(pred["smpl_params_incam"]["transl"]),
-        "smpl_incam_betas": _tensor_to_numpy(pred["smpl_params_incam"]["betas"]),
-        "camera_K_fullimg": _tensor_to_numpy(pred["K_fullimg"]),
     }
 
 
@@ -421,40 +414,6 @@ class GVHMRRunner:
         Log.info(f"[HMR4D] Elapsed: {Log.sync_time() - tic:.2f}s for data-length={data_time:.1f}s")
         return pred
 
-    def _write_exports(self, cfg, source_video_path):
-        pred = torch.load(cfg.paths.hmr4d_results, map_location="cpu")
-        flat_pred = _flatten_prediction(pred)
-        npz_path = Path(cfg.output_dir) / "gvhmr_data.npz"
-        meta_path = Path(cfg.output_dir) / "gvhmr_meta.json"
-        np.savez_compressed(npz_path, **flat_pred)
-
-        source_meta = _video_metadata(source_video_path, display_oriented=True)
-        processed_meta = _video_metadata(cfg.video_path)
-        meta = {
-            "schema_version": SCHEMA_VERSION,
-            "source_video_path": str(_resolve_path(source_video_path)),
-            "source_num_frames": source_meta["num_frames"],
-            "source_width": source_meta["width"],
-            "source_height": source_meta["height"],
-            "source_fps": source_meta["fps"],
-            "processed_num_frames": processed_meta["num_frames"],
-            "processed_fps": PROCESSED_FPS,
-            "static_cam": bool(cfg.static_cam),
-            "f_mm": cfg.f_mm,
-            "output_dir": str(_resolve_path(cfg.output_dir)),
-            "person_mode": PRIMARY_PERSON_MODE,
-        }
-        with meta_path.open("w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2, ensure_ascii=False)
-
-        return {
-            "output_dir": str(_resolve_path(cfg.output_dir)),
-            "data_path": str(npz_path.resolve()),
-            "meta_path": str(meta_path.resolve()),
-            "hmr4d_results_path": str(_resolve_path(cfg.paths.hmr4d_results)),
-            "meta": meta,
-        }
-
     def process_video(
         self,
         video_path,
@@ -481,33 +440,51 @@ class GVHMRRunner:
             )
 
             output_dir = Path(cfg.output_dir)
+            work_dir = output_dir / "_gvhmr_work"
+            cfg.video_path = str(output_dir / "0_input_video.mp4")
+            cfg.preprocess_dir = str(work_dir / "preprocess")
+            cfg.paths.bbx = str(Path(cfg.preprocess_dir) / "bbx.pt")
+            cfg.paths.bbx_xyxy_video_overlay = str(Path(cfg.preprocess_dir) / "bbx_xyxy_video_overlay.mp4")
+            cfg.paths.vit_features = str(Path(cfg.preprocess_dir) / "vit_features.pt")
+            cfg.paths.vitpose = str(Path(cfg.preprocess_dir) / "vitpose.pt")
+            cfg.paths.vitpose_video_overlay = str(Path(cfg.preprocess_dir) / "vitpose_video_overlay.mp4")
+            cfg.paths.slam = str(Path(cfg.preprocess_dir) / "slam_results.pt")
+            cfg.paths.hmr4d_results = str(output_dir / "hmr4d_results.pt")
             preprocess_dir = Path(cfg.preprocess_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
             preprocess_dir.mkdir(parents=True, exist_ok=True)
             Log.info(f"[Output Dir]: {output_dir}")
 
-            _prepare_video_copy(source_video_path, cfg.video_path)
-
-            if not Path(cfg.paths.hmr4d_results).exists():
+            result_path = Path(cfg.paths.hmr4d_results)
+            if not result_path.exists():
                 self._require_cuda("video processing")
+                _prepare_video_copy(source_video_path, cfg.video_path)
                 run_preprocess(cfg)
                 data = load_data_dict(cfg)
                 Log.info("[HMR4D] Predicting")
                 pred = self._predict(data, static_cam=cfg.static_cam)
-                torch.save(pred, cfg.paths.hmr4d_results)
+                torch.save(pred, result_path)
             else:
                 Log.info(f"[HMR4D] Reusing cached result at {cfg.paths.hmr4d_results}")
+                if not Path(cfg.video_path).is_file():
+                    _prepare_video_copy(source_video_path, cfg.video_path)
 
-            result = self._write_exports(cfg, source_video_path)
+            result = {
+                "output_dir": str(_resolve_path(output_dir)),
+                "input_video_path": str(_resolve_path(cfg.video_path)),
+                "hmr4d_results_path": str(_resolve_path(result_path)),
+            }
 
-            if not save_intermediate and preprocess_dir.exists():
-                shutil.rmtree(preprocess_dir)
-                Log.info(f"[Cleanup] Removed preprocess artifacts at {preprocess_dir}")
+            if not save_intermediate and work_dir.exists():
+                shutil.rmtree(work_dir)
+                Log.info(f"[Cleanup] Removed temporary GVHMR work dir at {work_dir}")
 
             return result
 
     def generate_preview(self, output_dir, log_callback=None):
         with _capture_logs(log_callback):
+            _ensure_chumpy_numpy_compat()
             cfg = build_demo_cfg(output_dir=output_dir, static_cam=True)
             output_dir = Path(cfg.output_dir)
             result_path = Path(cfg.paths.hmr4d_results)

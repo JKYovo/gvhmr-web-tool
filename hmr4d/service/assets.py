@@ -46,6 +46,26 @@ DPVO_ASSET = (
 )
 
 
+def inspect_assets(checkpoint_root, *, with_dpvo=False):
+    checkpoint_root = Path(checkpoint_root).expanduser().resolve()
+    manifest = list(ASSET_MANIFEST)
+    if with_dpvo:
+        manifest.append(DPVO_ASSET)
+
+    missing = []
+    for label, _url, relative_parts in manifest:
+        target_path = checkpoint_root.joinpath(*relative_parts)
+        if not target_path.is_file():
+            missing.append({"label": label, "path": str(target_path)})
+
+    return {
+        "ready": not missing,
+        "required_count": len(manifest),
+        "missing": missing,
+        "with_dpvo": bool(with_dpvo),
+    }
+
+
 def format_bytes(num_bytes):
     num_bytes = float(num_bytes)
     units = ("B", "KB", "MB", "GB", "TB")

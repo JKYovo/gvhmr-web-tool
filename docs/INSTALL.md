@@ -1,91 +1,83 @@
-# Install
+# 源码开发环境
 
-## Environment
+日常使用推荐 Docker。只有需要修改 GVHMR 推理、服务端或前端代码时，才需要源码环境。
 
-```bash
-git clone https://github.com/zju3dv/GVHMR
-cd GVHMR
-
-conda create -y -n gvhmr python=3.10
-conda activate gvhmr
-pip install -r requirements.txt
-pip install -e .
-# to install gvhmr in other repo as editable, try adding "python.analysis.extraPaths": ["path/to/your/package"] to settings.json
-```
-
-### Optional: DPVO (not recommended if you want fast inference speed)
-```bash
-cd third-party/DPVO
-wget https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip
-unzip eigen-3.4.0.zip -d thirdparty && rm -rf eigen-3.4.0.zip
-pip install torch-scatter -f "https://data.pyg.org/whl/torch-2.3.0+cu121.html"
-pip install numba pypose
-export CUDA_HOME=/usr/local/cuda-12.1/
-export PATH=$PATH:/usr/local/cuda-12.1/bin/
-pip install -e .
-```
-
-## Inputs & Outputs
+## 创建环境
 
 ```bash
-mkdir inputs
-mkdir outputs
+conda env create -f deploy/env/environment-dev.yml
+conda activate gvhmr-dev
 ```
 
-**Weights**
+该环境使用 Python 3.10、PyTorch 2.3 和 CUDA 12.1 对应依赖。创建完成后确认：
 
 ```bash
-mkdir -p inputs/checkpoints
-
-# 1. You need to sign up for downloading [SMPL](https://smpl.is.tue.mpg.de/) and [SMPLX](https://smpl-x.is.tue.mpg.de/). And the checkpoints should be placed in the following structure:
-
-inputs/checkpoints/
-├── body_models/smplx/
-│   └── SMPLX_{GENDER}.npz # SMPLX (We predict SMPLX params + evaluation)
-└── body_models/smpl/
-    └── SMPL_{GENDER}.pkl  # SMPL (rendering and evaluation)
-
-# 2. Download other pretrained models from Google-Drive (By downloading, you agree to the corresponding licences): https://drive.google.com/drive/folders/1eebJ13FUEXrKBawHpJroW0sNSxLjh9xD?usp=drive_link
-
-inputs/checkpoints/
-├── dpvo/
-│   └── dpvo.pth
-├── gvhmr/
-│   └── gvhmr_siga24_release.ckpt
-├── hmr2/
-│   └── epoch=10-step=25000.ckpt
-├── vitpose/
-│   └── vitpose-h-multi-coco.pth
-└── yolo/
-    └── yolov8x.pt
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-**Data**
+输出中的 CUDA 状态必须是 `True`。
 
-We provide preprocessed data for training and evaluation.
-Note that we do not intend to distribute the original datasets, and you need to download them (annotation, videos, etc.) from the original websites.
-*We're unable to provide the original data due to the license restrictions.*
-By downloading the preprocessed data, you agree to the original dataset's terms of use and use the data for research purposes only.
+## 准备模型
 
-You can download them from [Google-Drive](https://drive.google.com/drive/folders/10sEef1V_tULzddFxzCmDUpsIqfv7eP-P?usp=drive_link). Please place them in the "inputs" folder and execute the following commands:
+下载运行所需模型到 `inputs/checkpoints`：
 
 ```bash
-cd inputs
-# Train
-tar -xzvf AMASS_hmr4d_support.tar.gz
-tar -xzvf BEDLAM_hmr4d_support.tar.gz
-tar -xzvf H36M_hmr4d_support.tar.gz
-# Test
-tar -xzvf 3DPW_hmr4d_support.tar.gz
-tar -xzvf EMDB_hmr4d_support.tar.gz
-tar -xzvf RICH_hmr4d_support.tar.gz
-
-# The folder structure should be like this:
-inputs/
-├── AMASS/hmr4d_support/
-├── BEDLAM/hmr4d_support/
-├── H36M/hmr4d_support/
-├── 3DPW/hmr4d_support/
-├── EMDB/hmr4d_support/
-└── RICH/hmr4d_support/
+python -m hmr4d.service.assets --checkpoint-root inputs/checkpoints
 ```
+
+如果模型已经由 Docker 下载到 `runtime/checkpoints`，也可以通过环境变量复用：
+
+```bash
+export GVHMR_CHECKPOINT_ROOT="$PWD/runtime/checkpoints"
+```
+
+## 启动源码服务
+
+```bash
+python -m hmr4d.service.server --host 127.0.0.1 --port 7860
+```
+
+需要让 Web 调用独立 GVHMR 算法 worktree 时，使用源码启动脚本：
+
+```bash
+bash start_web_source.sh
+```
+
+脚本会自动发现同级目录 `../gvhmr-core-opt`，并将其作为外部推理 backend。也可以显式指定：
+
+```bash
+GVHMR_CORE_ROOT=/path/to/gvhmr-core-opt bash start_web_source.sh
+```
+
+停止源码服务：
+
+```bash
+bash stop_web_source.sh
+```
+
+外部 backend 在独立 Python 进程中运行。Web 继续管理任务、日志和预览，算法导入固定来自 `GVHMR_CORE_ROOT`，不会与 Web 仓库内的 `hmr4d` 混用。
+
+也可以使用包装入口：
+
+```bash
+python tools/app/run_ui.py --host 127.0.0.1 --port 7860
+```
+
+源码模式默认使用：
+
+```text
+inputs/checkpoints
+runtime/jobs
+runtime/batches
+runtime/db/job_db.sqlite
+```
+
+## 开发检查
+
+```bash
+python -m unittest discover -s tests -v
+node --check hmr4d/service/static_app/app.js
+python -m compileall hmr4d/service
+```
+
+这些测试使用临时目录和假预览 runner，不会执行完整 GPU 推理。

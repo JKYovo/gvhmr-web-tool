@@ -12,6 +12,10 @@ hydra_colorlog
 rich
 
 # Common utilities
+fastapi
+uvicorn
+python-multipart
+httpx
 numpy==1.23.5
 jupyter
 matplotlib

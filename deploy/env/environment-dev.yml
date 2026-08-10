@@ -8,5 +8,4 @@ dependencies:
   - git
   - pip:
       - -r requirements.txt
-      - -r deploy/env/requirements-ui.txt
       - -e .

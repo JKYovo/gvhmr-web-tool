@@ -2,258 +2,95 @@
 
 [English README](README.en.md)
 
-这个仓库在原始 [zju3dv/GVHMR](https://github.com/zju3dv/GVHMR) 的基础上，做了一个更适合团队内部使用的本地 Web 工具， 用于：
+把 [GVHMR](https://github.com/zju3dv/GVHMR) 的单人视频人体动作恢复流程封装成一个可部署的本地 Web 工具。使用者可以上传单个或一批视频，查看持久化任务，下载 `hmr4d_results.pt`，并在需要时生成相机视角与世界坐标预览。
 
-- 上传视频
-- 运行 GVHMR 单人主轨推理
-- 导出结构化人体运动数据 `gvhmr_data.npz` 和 `gvhmr_meta.json`
-- 按需生成预览视频
+![GVHMR Web 界面](docs/images/gvhmr-web.png)
 
-它保留了原始 GVHMR 的推理链路，同时新增了：
+## 主要功能
 
-- 可复用的 Python API：`hmr4d/api/video_to_data.py`
-- 本地 Web UI
-- Docker 优先的一键部署方式
-- 任务持久化、批量提交和结果打包下载
-- 更紧凑的任务历史页、可复制 `job_id` 和下载按钮
-- 在统一入口中可把成功的 GVHMR 结果一键提交给 GMR 转 ELF3
+- 单视频与批量上传，支持 `mp4 / mov / avi / mkv / webm`
+- 静态相机和可选焦距 `f_mm`
+- SQLite 任务持久化、状态筛选、取消和失败重试
+- 推理完成后按需生成预览，预览失败不会破坏人体动作结果
+- 页面内播放预览，并分别下载 PT、相机视角、全局视角或 ZIP
+- 上传临时文件自动清理，任务输入和结果统一保存在任务目录
+- Docker 优先的一键部署，以及供开发者使用的源码模式
 
-## 这个仓库适合做什么
+## 使用流程
 
-如果你希望把 GVHMR 当成“工具”而不是“研究 demo”来使用，这个仓库就是为这个场景准备的。
+1. 上传视频并提交 GVHMR 推理。
+2. 在右侧任务控制台查看状态，失败任务可以重试。
+3. 下载 `hmr4d_results.pt`，或点击“生成预览”检查恢复效果。
 
-典型使用流程：
+## 快速启动
 
-1. 启动 Web 服务
-2. 上传一个或多个视频
-3. 下载 `NPZ + JSON` 结果
-4. 按需下载预览视频
-5. 如果同时部署了 GMR Web，可以把 `hmr4d_results.pt` 继续转成 ELF3 机器人动作
-
-## Web 页面能力
-
-当前 Web 页面包含：
-
-- 单视频处理：上传视频或填写本地路径，生成人体运动数据。
-- 批量处理：一次提交多个视频或导入服务端目录。
-- 任务历史：查看最近任务、复制 `job_id`、下载结果、查看预览。
-- 结果下载：使用紧凑下载按钮，不再展开大面积文件卡片。
-- 日志与详情：默认折叠，需要排错时再展开。
-
-如果 GVHMR 和 GMR 通过统一入口一起启动，GVHMR 成功任务可以直接点击“转 ELF3”，底层会把该任务的 `hmr4d_results.pt` 提交给 GMR。
-
-## 一键部署
-
-这是目前最推荐的运行方式。
-
-### 支持的运行环境
-
-- Linux `x86_64`
-- NVIDIA GPU
-- 已安装 NVIDIA 驱动
-- 已安装 Docker
-- 已安装 NVIDIA Container Toolkit
-
-### 环境自检
-
-可以先单独运行环境检查：
+运行环境需要 Linux x86_64、NVIDIA GPU、可用驱动、Docker 和 NVIDIA Container Toolkit。
 
 ```bash
 bash doctor.sh
-```
-
-如果你在 Ubuntu / Debian 上，希望脚本尽量自动补齐运行环境，可以使用：
-
-```bash
-bash doctor.sh --fix
-```
-
-`--fix` 目前会尝试自动处理：
-
-- 安装 Docker
-- 启动 `docker.service`
-- 安装并配置 NVIDIA Container Toolkit
-
-出于安全和稳定性考虑，NVIDIA 驱动本身不会被脚本自动安装；如果 `nvidia-smi` 不可用，脚本会直接报错并提示你先装驱动。
-
-### 启动
-
-在仓库根目录执行：
-
-```bash
 bash start_web.sh
 ```
 
-如果希望启动前自动尝试修复环境：
-
-```bash
-bash start_web.sh --fix
-```
-
-默认访问地址：
+浏览器访问：
 
 ```text
-http://127.0.0.1:7860/ui
+http://127.0.0.1:7860/
 ```
 
-### 局域网访问
-
-如果希望同一局域网内的其他设备访问：
-
-```bash
-bash start_web_lan.sh
-```
-
-同样支持：
-
-```bash
-bash start_web_lan.sh --fix
-```
-
-### 查看状态与停止服务
+查看状态或停止服务：
 
 ```bash
 bash status.sh
 bash stop_web.sh
 ```
 
-### 首次启动会做什么
-
-首次启动时，脚本会自动：
-
-- 检查主机运行环境
-- 构建 Docker 镜像
-- 检查容器内 CUDA 是否可用
-- 创建 `runtime/checkpoints`、`runtime/jobs`、`runtime/batches`、`runtime/db`
-- 把必需模型下载到 `runtime/checkpoints`
-
-后续再次启动时，会直接复用已有镜像和权重。
-
-### 首次部署大概要下载多久
-
-第一次从零部署时，主要会下载两部分内容：
-
-- Docker 运行时镜像和 Python 依赖，约 `11GB`
-- 模型权重，约 `5.6GB`
-
-合计首次下载量大约在 `16GB ~ 17GB`。
-
-一个比较现实的时间预估是：
-
-- 较快网络：约 `30 ~ 60` 分钟
-- 一般网络：约 `45 ~ 90` 分钟
-- 较慢或不稳定网络：约 `1 ~ 3` 小时
-
-通常最慢的阶段是 Docker 构建里执行 `pip install` 的那一层，以及后面的 `HMR2` 和 `ViTPose` 大模型下载。
-
-现在启动脚本会明确打印当前阶段，例如：
-
-- 正在构建 / 复用 Docker 运行时镜像
-- 正在检查容器内 CUDA
-- 正在下载 / 复用模型权重
-
-## 本地源码模式
-
-如果你是在本地做开发，而不是走 Docker 部署：
-
-```bash
-pip install -r deploy/env/requirements-ui.txt
-python tools/app/run_ui.py
-```
-
-源码模式主要用于开发调试。给同事或其他使用者部署时，优先推荐 `start_web.sh`。
+第一次启动会构建 Docker 镜像并下载模型，总下载量约 `16GB ~ 17GB`。完整说明见 [快速开始](docs/QUICKSTART.md) 和 [部署说明](docs/DEPLOYMENT.md)。
 
 ## 输出内容
 
-每个任务的结果会写到 `runtime/jobs` 下。
+每个任务默认保存到：
 
-核心输出：
+```text
+runtime/jobs/<视频名>_<任务短 ID>/
+```
 
-- `gvhmr_data.npz`
-- `gvhmr_meta.json`
-- `hmr4d_results.pt`
+核心产物：
 
-可选输出：
+- `hmr4d_results.pt`：GVHMR 人体动作结果
+- `job.json`：任务摘要
+- `artifacts.zip`：当前可用结果的打包文件
+
+按需生成的预览：
 
 - `1_incam.mp4`
 - `2_global.mp4`
 - `*_3_incam_global_horiz.mp4`
 
-## 数据格式
+`submitted_input.*`、`0_input_video.mp4` 和 `_gvhmr_work/` 属于任务输入或中间文件，不是稳定的数据交换格式。
 
-`gvhmr_data.npz` 中会包含类似这些扁平字段：
+## 文档
 
-- `smpl_global_body_pose`
-- `smpl_global_global_orient`
-- `smpl_global_transl`
-- `smpl_global_betas`
-- `smpl_incam_body_pose`
-- `smpl_incam_global_orient`
-- `smpl_incam_transl`
-- `smpl_incam_betas`
-- `camera_K_fullimg`
+- [快速开始](docs/QUICKSTART.md)
+- [Docker 与局域网部署](docs/DEPLOYMENT.md)
+- [源码开发环境](docs/INSTALL.md)
+- [常见问题](docs/TROUBLESHOOTING.md)
 
-`gvhmr_meta.json` 里会记录任务元信息，例如：
+## 适用范围
 
-- 源视频路径
-- 源视频分辨率和 fps
-- 处理后帧数
-- 处理后 fps
-- `static_cam`
-- `f_mm`
-- 输出目录
-- `person_mode = "single_primary_track"`
+- 当前只处理单人主轨，不提供多人身份管理。
+- GVHMR 推理要求 CUDA，不支持 CPU 推理。
+- 默认 Web 服务是独立工具，不依赖 GMR Web。
+- `runtime/`、模型权重和 Docker 镜像不提交到 Git。
 
-## 仓库结构
+## 上游与引用
 
-- `deploy/docker/`
-  Dockerfile 和 Compose 配置
-- `deploy/env/`
-  运行时和开发环境依赖文件
-- `deploy/scripts/`
-  真正的部署脚本实现
-- 根目录 `doctor.sh` / `start_web.sh` / `start_web_lan.sh` / `status.sh` / `stop_web.sh`
-  面向使用者的薄包装入口
-- `hmr4d/api/`
-  视频转结构化数据的 API 层
-- `hmr4d/service/`
-  任务管理、持久化、服务入口和 Web UI
-- `tools/app/run_ui.py`
-  本地源码模式启动入口
-- `start_web.sh`
-  本机 Docker 一键启动
-- `start_web_lan.sh`
-  局域网可访问的一键启动
-- `doctor.sh`
-  运行环境检测与可选自动修复入口
-
-## 重要说明
-
-- 当前版本只面向单人主轨处理
-- 不支持 CPU 推理
-- `inputs/`、`outputs/`、`runtime/` 不纳入 git 版本管理
-- Docker 镜像和模型权重不会直接提交到仓库
-
-## 开发环境
-
-如果你要做开发：
-
-```bash
-conda env create -f deploy/env/environment-dev.yml
-conda activate gvhmr-dev
-```
-
-## 上游项目
-
-本仓库基于原始 GVHMR 项目构建：
+本工具基于原始 GVHMR 项目：
 
 - 项目主页：https://zju3dv.github.io/gvhmr
 - 论文：https://arxiv.org/abs/2409.06662
 - 上游仓库：https://github.com/zju3dv/GVHMR
 
-## 引用
-
-如果你在研究中使用的是 GVHMR 本身，请引用原论文：
+使用 GVHMR 研究成果时，请引用原论文：
 
 ```bibtex
 @inproceedings{shen2024gvhmr,
@@ -263,11 +100,3 @@ conda activate gvhmr-dev
   year={2024}
 }
 ```
-
-## 致谢
-
-感谢以下项目作者的工作：
-
-- [WHAM](https://github.com/yohanshin/WHAM)
-- [4D-Humans](https://github.com/shubham-goel/4D-Humans)
-- [ViTPose-Pytorch](https://github.com/gpastal24/ViTPose-Pytorch)
