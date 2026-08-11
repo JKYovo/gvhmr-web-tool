@@ -131,9 +131,9 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(disabled.status_code, 400, disabled.text)
         self.assertIn("not enabled", disabled.json()["detail"])
 
-    def test_flat_ground_postprocess_preserves_raw_and_selects_enhanced(self):
+    def test_contact_floor_postprocess_preserves_raw_and_selects_enhanced(self):
         root = Path(self.temp_dir.name) / "flat-core"
-        script = root / "tools" / "bench" / "human3r_p2y" / "apply_flat_ground_y.py"
+        script = root / "tools" / "bench" / "human3r_p2y" / "apply_contact_floor_y.py"
         script.parent.mkdir(parents=True)
         script.write_text(
             "import argparse, json\n"
@@ -142,8 +142,10 @@ class ServiceWebTest(unittest.TestCase):
             "p.add_argument('--gvhmr-result')\n"
             "p.add_argument('--video')\n"
             "p.add_argument('--output-dir')\n"
+            "p.add_argument('--smoothing-seconds')\n"
+            "p.add_argument('--allow-large-correction', action='store_true')\n"
             "a=p.parse_args(); out=Path(a.output_dir); out.mkdir(parents=True, exist_ok=True)\n"
-            "(out/'flat_ground_y_hmr4d_results.pt').write_bytes(b'enhanced')\n"
+            "(out/'contact_floor_y_hmr4d_results.pt').write_bytes(b'enhanced')\n"
             "(out/'metrics.json').write_text(json.dumps({'decision':'diagnostic_pass'}))\n",
             encoding="utf-8",
         )

@@ -134,11 +134,11 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
 
     constraint_dir = output_dir / "ground_constraint_flat_y"
     constraint_dir.mkdir(parents=True, exist_ok=True)
-    enhanced_path = constraint_dir / "flat_ground_y_hmr4d_results.pt"
+    enhanced_path = constraint_dir / "contact_floor_y_hmr4d_results.pt"
     metrics_path = constraint_dir / "metrics.json"
-    script = core_root / "tools" / "bench" / "human3r_p2y" / "apply_flat_ground_y.py"
+    script = core_root / "tools" / "bench" / "human3r_p2y" / "apply_contact_floor_y.py"
     if not script.is_file():
-        raise FileNotFoundError(f"Flat-ground-Y postprocessor not found: {script}")
+        raise FileNotFoundError(f"Contact-floor-Y postprocessor not found: {script}")
 
     error = None
     if not enhanced_path.is_file():
@@ -151,6 +151,9 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
             str(video_path),
             "--output-dir",
             str(constraint_dir),
+            "--smoothing-seconds",
+            "0.5",
+            "--allow-large-correction",
         ]
         completed = subprocess.run(
             command,
@@ -172,7 +175,7 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
 
     if error is None and decision == "diagnostic_pass" and enhanced_path.is_file():
         shutil.copy2(enhanced_path, result_path)
-        print("[Ground Constraint] Flat-ground-Y applied; raw tensor preserved.", flush=True)
+        print("[Ground Constraint] Shared contact-floor-Y applied; raw tensor preserved.", flush=True)
         return {
             "ground_constraint": "flat_y",
             "ground_constraint_status": "applied",
@@ -183,7 +186,7 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
 
     shutil.copy2(raw_path, result_path)
     reason = error or f"guardrail decision: {decision or 'missing'}"
-    print(f"[Ground Constraint] Flat-ground-Y fallback to raw result: {reason}", flush=True)
+    print(f"[Ground Constraint] Shared contact-floor-Y fallback to raw result: {reason}", flush=True)
     payload = {
         "ground_constraint": "flat_y",
         "ground_constraint_status": "fallback",

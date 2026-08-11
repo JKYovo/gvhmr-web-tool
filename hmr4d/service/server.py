@@ -263,7 +263,7 @@ def _ground_constraint_capabilities(runtime):
     flat_y_available = bool(
         core.get("ready")
         and root is not None
-        and (root / "tools" / "bench" / "human3r_p2y" / "apply_flat_ground_y.py").is_file()
+        and (root / "tools" / "bench" / "human3r_p2y" / "apply_contact_floor_y.py").is_file()
     )
     return {
         "default": "flat_y" if flat_y_available else "none",

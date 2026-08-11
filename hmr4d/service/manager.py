@@ -487,6 +487,11 @@ class JobManager:
 
     def _build_artifact_map(self, job):
         output_dir = Path(job["output_dir"])
+        constraint_dir = output_dir / "ground_constraint_flat_y"
+        constraint_result = constraint_dir / "contact_floor_y_hmr4d_results.pt"
+        legacy_constraint_result = constraint_dir / "flat_ground_y_hmr4d_results.pt"
+        if not constraint_result.is_file() and legacy_constraint_result.is_file():
+            constraint_result = legacy_constraint_result
         existing = {
             key: value
             for key, value in job.get("artifacts", {}).items()
@@ -497,11 +502,9 @@ class JobManager:
             "input_video_path": str(output_dir / "0_input_video.mp4"),
             "hmr4d_results_path": str(output_dir / "hmr4d_results.pt"),
             "raw_hmr4d_results_path": str(output_dir / "hmr4d_results_raw.pt"),
-            "flat_ground_y_results_path": str(
-                output_dir / "ground_constraint_flat_y" / "flat_ground_y_hmr4d_results.pt"
-            ),
+            "flat_ground_y_results_path": str(constraint_result),
             "ground_constraint_metrics_path": str(
-                output_dir / "ground_constraint_flat_y" / "metrics.json"
+                constraint_dir / "metrics.json"
             ),
             "incam_video_path": str(output_dir / "1_incam.mp4"),
             "global_video_path": str(output_dir / "2_global.mp4"),
@@ -522,6 +525,10 @@ class JobManager:
             (output_dir / "job.json", "job.json"),
             (output_dir / "hmr4d_results.pt", "hmr4d_results.pt"),
             (output_dir / "hmr4d_results_raw.pt", "hmr4d_results_raw.pt"),
+            (
+                output_dir / "ground_constraint_flat_y" / "contact_floor_y_hmr4d_results.pt",
+                "ground_constraint_flat_y/contact_floor_y_hmr4d_results.pt",
+            ),
             (
                 output_dir / "ground_constraint_flat_y" / "flat_ground_y_hmr4d_results.pt",
                 "ground_constraint_flat_y/flat_ground_y_hmr4d_results.pt",
