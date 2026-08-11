@@ -13,6 +13,82 @@ pip install -e .
 # to install gvhmr in other repo as editable, try adding "python.analysis.extraPaths": ["path/to/your/package"] to settings.json
 ```
 
+### FootMR inference assets
+
+FootMR inference needs its combined checkpoint and the COCO-wholebody
+ViTPose checkpoint. The downloader verifies their SHA256 hashes and stores
+them under `inputs/footmr_assets`, deliberately avoiding
+`inputs/checkpoints` because that path may be shared with another worktree.
+
+```bash
+conda activate gvhmr
+python tools/demo/download_footmr_assets.py
+```
+
+Expected files:
+
+```text
+inputs/footmr_assets/
+├── footmr_checkpoint.ckpt
+└── vitpose-h-wholebody.pth
+```
+
+### Optional: Sapiens foot keypoints
+
+Sapiens is slower and substantially more memory intensive than ViTPose. It
+is not required for the default FootMR path.
+
+```bash
+git submodule update --init third-party/sapiens
+cd third-party/sapiens/engine && pip install -e . -v --no-build-isolation
+cd ../cv && pip install -e . -v --no-build-isolation && pip install -r requirements/optional.txt
+cd ../pretrain && pip install -e . -v --no-build-isolation
+cd ../pose && pip install -e . -v --no-build-isolation
+cd ../../..
+```
+
+Download `sapiens_2b_coco_wholebody_best_coco_wholebody_AP_745.pth` from
+<https://huggingface.co/noahcao/sapiens-pose-coco/tree/main/sapiens_host/pose/checkpoints/sapiens_2b>
+and place it in `inputs/footmr_assets/`. Then run the demo with
+`--use_sapiens`.
+
+### Using gvhmr-web-tool
+
+The sibling Web tool's `start_web_source.sh` discovers this worktree and sets
+the external worker's `PYTHONPATH` explicitly. In that mode, this repository
+does not need an additional `pip install -e .`; the Web package and algorithm
+package remain isolated in separate processes.
+
+### Runtime defaults and performance options
+
+No additional editable install is needed when the source-mode Web launcher is
+used. The selected core worktree first resamples an input to 30 FPS according
+to timestamps and only then runs bbox tracking, ViTPose, HMR2 and
+GVHMR/FootMR. This preserves the duration of 60 FPS sources instead of making
+their output play at half speed.
+
+For GMR-only generation, preview rendering can be skipped without changing
+the saved tensor:
+
+```bash
+python tools/demo/demo.py --video VIDEO --render none --profile
+```
+
+The tested FootMR defaults are:
+
+- ViTPose whole-body: FP16, batch size 16.
+- HMR2 features: FP32, batch size 16.
+- shared video decode/crop: enabled.
+- transformer attention: dense.
+- cross-job cache: `outputs/cache`.
+
+Use `--pose_inference_dtype fp32` to restore the original FP32 ViTPose path.
+`--inference_dtype fp16` enables FP16 for both ViTPose and HMR2, but is not a
+quality-preserving default because contact post-processing can amplify the
+HMR2 feature difference. Use `--cache_root none` to disable cross-job caches.
+`--profile` writes CUDA-synchronized stage timings to `performance.json` in
+the result directory.
+
 ### Optional: DPVO (not recommended if you want fast inference speed)
 ```bash
 cd third-party/DPVO

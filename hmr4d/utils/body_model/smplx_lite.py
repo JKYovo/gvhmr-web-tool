@@ -233,6 +233,47 @@ class SmplxLiteV437Coco17(SmplxLite):
         return verts_437, joints
 
 
+class SmplxLiteV437Coco23(SmplxLite):
+    """Lightweight SMPL-X model returning COCO17 plus six foot landmarks."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        smplx2smpl = torch.load(PROJ_ROOT / "hmr4d/utils/body_model/smplx2smpl_sparse.pt")
+        coco17_regressor = torch.load(PROJ_ROOT / "hmr4d/utils/body_model/smpl_coco17_J_regressor.pt")
+
+        # Big toe, small toe and heel for left/right feet in the SMPL topology.
+        smpl_foot_indices = [3216, 3226, 3387, 6617, 6624, 6787]
+        smpl_foot_regressor = torch.zeros((6, 6890))
+        smpl_foot_regressor[torch.arange(6), smpl_foot_indices] = 1.0
+        coco23_regressor = torch.cat((coco17_regressor, smpl_foot_regressor), dim=0)
+        smplx2coco23 = torch.matmul(coco23_regressor, smplx2smpl.to_dense())
+
+        jids, smplx_vids = torch.where(smplx2coco23 != 0)
+        smplx2coco23_interested = torch.zeros((len(smplx_vids), 23))
+        for idx, (jid, smplx_vid) in enumerate(zip(jids, smplx_vids)):
+            smplx2coco23_interested[idx, jid] = smplx2coco23[jid, smplx_vid]
+        self.register_buffer("smplx2coco23_interested", smplx2coco23_interested, False)
+        assert len(smplx_vids) == 140
+
+        smplx_vids437 = torch.load(PROJ_ROOT / "hmr4d/utils/body_model/smplx_verts437.pt")
+        smplx_vids = torch.cat([smplx_vids, smplx_vids437])
+        self.v_template = self.v_template[smplx_vids].clone()
+        self.shapedirs = self.shapedirs[smplx_vids].clone()
+        self.posedirs = self.posedirs[:, smplx_vids].clone()
+        self.lbs_weights = self.lbs_weights[smplx_vids].clone()
+
+    def forward(self, body_pose, betas, global_orient, transl):
+        verts = super().forward(body_pose, betas, global_orient, transl)
+        verts_437 = verts[..., 140:, :].clone()
+        joints = einsum(
+            self.smplx2coco23_interested,
+            verts[..., :140, :],
+            "v j, ... v c -> ... j c",
+        )
+        return verts_437, joints
+
+
 class SmplxLiteSmplN24(SmplxLite):
     """Output SMPL(not smplx)-Neutral 24 joints (Faster, but cannot output vertices)"""
 

@@ -6,11 +6,84 @@ import shutil
 import ffmpeg
 from tqdm import tqdm
 import cv2
+from fractions import Fraction
 
 
 def get_video_lwh(video_path):
     L, H, W, _ = iio.improps(video_path, plugin="pyav").shape
     return L, W, H
+
+
+def get_video_fps_duration(video_path):
+    """Return the average video FPS and timeline duration from ffprobe metadata."""
+    probe = ffmpeg.probe(str(video_path), select_streams="v:0")
+    stream = probe["streams"][0]
+    rate = stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "0/1"
+    fps = float(Fraction(rate)) if rate != "0/0" else 0.0
+    duration = stream.get("duration") or probe.get("format", {}).get("duration")
+    duration = float(duration) if duration is not None else None
+    return fps, duration
+
+
+def normalize_video_fps(input_path, output_path, target_fps=30, crf=23):
+    """Create a constant-FPS video while preserving its timeline duration.
+
+    Unlike relabeling every decoded frame with a new FPS, the ffmpeg ``fps``
+    filter drops or duplicates frames according to timestamps. This keeps a
+    60 FPS source at its original speed when normalized to 30 FPS.
+    """
+    input_path = Path(input_path).expanduser().resolve()
+    output_path = Path(output_path).expanduser().resolve()
+    if input_path == output_path:
+        raise ValueError("normalize_video_fps requires different input and output paths")
+
+    source_fps, source_duration = get_video_fps_duration(input_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.is_file():
+        output_fps, output_duration = get_video_fps_duration(output_path)
+        duration_matches = (
+            source_duration is None
+            or output_duration is None
+            or abs(source_duration - output_duration) <= max(0.1, 1.5 / target_fps)
+        )
+        if abs(output_fps - target_fps) < 1e-3 and duration_matches:
+            return {
+                "source_fps": source_fps,
+                "source_duration": source_duration,
+                "output_fps": output_fps,
+                "output_duration": output_duration,
+                "reused": True,
+            }
+
+    temporary = output_path.with_suffix(output_path.suffix + ".normalize-tmp.mp4")
+    temporary.unlink(missing_ok=True)
+    video = ffmpeg.input(str(input_path)).video.filter("fps", fps=target_fps, round="near")
+    output = ffmpeg.output(
+        video,
+        str(temporary),
+        vcodec="libx264",
+        pix_fmt="yuv420p",
+        r=target_fps,
+        crf=crf,
+        an=None,
+    )
+    ffmpeg.run(output, overwrite_output=True, quiet=True)
+    temporary.replace(output_path)
+    output_fps, output_duration = get_video_fps_duration(output_path)
+    if abs(output_fps - target_fps) >= 1e-3:
+        raise RuntimeError(f"Expected {target_fps} FPS, got {output_fps} for {output_path}")
+    if source_duration is not None and output_duration is not None:
+        if abs(source_duration - output_duration) > max(0.1, 1.5 / target_fps):
+            raise RuntimeError(
+                f"Video normalization changed duration: {source_duration:.3f}s -> {output_duration:.3f}s"
+            )
+    return {
+        "source_fps": source_fps,
+        "source_duration": source_duration,
+        "output_fps": output_fps,
+        "output_duration": output_duration,
+        "reused": False,
+    }
 
 
 def read_video_np(video_path, start_frame=0, end_frame=-1, scale=1.0):

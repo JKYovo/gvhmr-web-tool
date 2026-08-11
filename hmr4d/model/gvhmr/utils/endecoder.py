@@ -18,7 +18,12 @@ from . import stats_compose
 
 
 class EnDecoder(nn.Module):
-    def __init__(self, stats_name="DEFAULT_01", noise_pose_k=10):
+    def __init__(
+        self,
+        stats_name="DEFAULT_01",
+        noise_pose_k=10,
+        smplx_type="supermotion_v437coco17",
+    ):
         super().__init__()
         # Load mean, std
         stats = getattr(stats_compose, stats_name)
@@ -30,7 +35,7 @@ class EnDecoder(nn.Module):
         self.noise_pose_k = noise_pose_k
 
         # smpl
-        self.smplx_model = make_smplx("supermotion_v437coco17")
+        self.smplx_model = make_smplx(smplx_type)
         parents = self.smplx_model.parents[:22]
         self.register_buffer("parents_tensor", parents, False)
         self.parents = parents.tolist()
@@ -62,6 +67,12 @@ class EnDecoder(nn.Module):
             return body_pose_r6d
         body_pose_r6d = (body_pose_r6d - self.mean[:126]) / self.std[:126]  # (B, L, C)
         return body_pose_r6d
+
+    def normalize_ankle_pose_r6d(self, rel_ankle_r6d):
+        """Normalize the left/right ankle rotations in SMPL-X body-pose order."""
+        B, L = rel_ankle_r6d.shape[:2]
+        rel_ankle_r6d = rel_ankle_r6d.reshape(B, L, -1)
+        return (rel_ankle_r6d - self.mean[6 * 6 : 8 * 6]) / self.std[6 * 6 : 8 * 6]
 
     def fk_v2(self, body_pose, betas, global_orient=None, transl=None, get_intermediate=False):
         """

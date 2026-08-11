@@ -1,25 +1,49 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+from pathlib import Path
 from .vitpose_pytorch import build_model
 from .vitfeat_extractor import get_batch
 from tqdm import tqdm
 
 from hmr4d.utils.kpts.kp2d_utils import keypoints_from_heatmaps
 from hmr4d.utils.geo_transform import cvt_p2d_from_pm1_to_i
-from hmr4d.utils.geo.flip_utils import flip_heatmap_coco17
+from hmr4d.utils.geo.flip_utils import flip_heatmap_coco17, flip_heatmap_coco23
 
 
 class VitPoseExtractor:
-    def __init__(self, tqdm_leave=True):
-        ckpt_path = "inputs/checkpoints/vitpose/vitpose-h-multi-coco.pth"
-        self.pose = build_model("ViTPose_huge_coco_256x192", ckpt_path)
+    def __init__(
+        self,
+        number_joints=17,
+        batch_size=16,
+        tqdm_leave=True,
+        ckpt_path=None,
+        inference_dtype="fp32",
+        flip_test=True,
+    ):
+        if number_joints == 17:
+            ckpt_path = ckpt_path or "inputs/checkpoints/vitpose/vitpose-h-multi-coco.pth"
+            model_config = "ViTPose_huge_coco_256x192"
+        elif number_joints == 23:
+            ckpt_path = ckpt_path or "inputs/footmr_assets/vitpose-h-wholebody.pth"
+            model_config = "ViTPose_huge_wholebody_256x192"
+        else:
+            raise ValueError(f"Unsupported joint count: {number_joints}")
+        if not Path(ckpt_path).is_file():
+            raise FileNotFoundError(
+                f"ViTPose checkpoint not found: {ckpt_path}. "
+                "For FootMR run tools/demo/download_footmr_assets.py first."
+            )
+        self.number_joints = number_joints
+        self.batch_size = batch_size
+        self.pose = build_model(model_config, ckpt_path)
         self.pose.cuda().eval()
 
-        self.flip_test = True
+        self.flip_test = flip_test
+        self.inference_dtype = inference_dtype
         self.tqdm_leave = tqdm_leave
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def extract(self, video_path, bbx_xys, img_ds=0.5):
         # Get the batch
         if isinstance(video_path, str):
@@ -30,18 +54,26 @@ class VitPoseExtractor:
 
         # Inference
         L, _, H, W = imgs.shape  # (L, 3, H, W)
-        batch_size = 16
+        batch_size = self.batch_size
+        autocast_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(self.inference_dtype)
         vitpose = []
         for j in tqdm(range(0, L, batch_size), desc="ViTPose", leave=self.tqdm_leave):
             # Heat map
             imgs_batch = imgs[j : j + batch_size, :, :, 32:224].cuda()
-            if self.flip_test:
-                heatmap, heatmap_flipped = self.pose(torch.cat([imgs_batch, imgs_batch.flip(3)], dim=0)).chunk(2)
-                heatmap_flipped = flip_heatmap_coco17(heatmap_flipped)
-                heatmap = (heatmap + heatmap_flipped) * 0.5
-                del heatmap_flipped
-            else:
-                heatmap = self.pose(imgs_batch.clone())  # (B, J, 64, 48)
+            with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
+                if self.flip_test:
+                    heatmap, heatmap_flipped = self.pose(torch.cat([imgs_batch, imgs_batch.flip(3)], dim=0)).chunk(2)
+                    if self.number_joints == 17:
+                        heatmap_flipped = flip_heatmap_coco17(heatmap_flipped)
+                    else:
+                        heatmap = heatmap[:, :23]
+                        heatmap_flipped = flip_heatmap_coco23(heatmap_flipped[:, :23])
+                    heatmap = (heatmap + heatmap_flipped) * 0.5
+                    del heatmap_flipped
+                else:
+                    heatmap = self.pose(imgs_batch.clone())  # (B, J, 64, 48)
+                    if self.number_joints == 23:
+                        heatmap = heatmap[:, :23]
 
             if False:
                 # Get joint
@@ -59,7 +91,7 @@ class VitPoseExtractor:
 
             else:  # postprocess from mmpose
                 bbx_xys_batch = bbx_xys[j : j + batch_size]
-                heatmap = heatmap.clone().cpu().numpy()
+                heatmap = heatmap.float().cpu().numpy()
                 center = bbx_xys_batch[:, :2].numpy()
                 scale = (torch.cat((bbx_xys_batch[:, [2]] * 24 / 32, bbx_xys_batch[:, [2]]), dim=1) / 200).numpy()
                 preds, maxvals = keypoints_from_heatmaps(heatmaps=heatmap, center=center, scale=scale, use_udp=True)
@@ -68,7 +100,7 @@ class VitPoseExtractor:
 
             vitpose.append(kp2d.detach().cpu().clone())
 
-        vitpose = torch.cat(vitpose, dim=0).clone()  # (F, 17, 3)
+        vitpose = torch.cat(vitpose, dim=0).clone()  # (F, J, 3)
         return vitpose
 
 
@@ -100,7 +132,7 @@ def get_heatmap_preds(heatmap, normalize_keypoints=True, thr=0.0, soft=False):
         default_patch = torch.zeros(patch_size, patch_size).to(heatmap)
         default_patch[patch_half, patch_half] = 1
         for b in range(B):
-            for j in range(17):
+            for j in range(J):
                 x, y = preds[b, j].int()
                 if x >= patch_half and x <= W - patch_half and y >= patch_half and y <= H - patch_half:
                     patches[b, j] = heatmap[

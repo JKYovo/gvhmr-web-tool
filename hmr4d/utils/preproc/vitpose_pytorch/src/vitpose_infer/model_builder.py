@@ -45,6 +45,35 @@ models = {
         train_cfg=dict(),
         test_cfg=dict(),
     ),
+    "ViTPose_huge_wholebody_256x192": dict(
+        type="TopDown",
+        pretrained=None,
+        backbone=dict(
+            type="ViT",
+            img_size=(256, 192),
+            patch_size=16,
+            embed_dim=1280,
+            depth=32,
+            num_heads=16,
+            ratio=1,
+            use_checkpoint=False,
+            mlp_ratio=4,
+            qkv_bias=True,
+            drop_path_rate=0.3,
+        ),
+        keypoint_head=dict(
+            type="TopdownHeatmapSimpleHead",
+            in_channels=1280,
+            num_deconv_layers=2,
+            num_deconv_filters=(256, 256),
+            num_deconv_kernels=(4, 4),
+            extra=dict(final_conv_kernel=1),
+            out_channels=133,
+            loss_keypoint=dict(type="JointsMSELoss", use_target_weight=True),
+        ),
+        train_cfg=dict(),
+        test_cfg=dict(),
+    ),
     "ViTPose_base_coco_256x192": dict(
         type="TopDown",
         pretrained=None,
@@ -160,7 +189,8 @@ def build_model(model_name, checkpoint=None):
     if checkpoint is not None:
         check = torch.load(checkpoint)
 
-        pose.load_state_dict(check["state_dict"])
+        state_dict = check["state_dict"] if "state_dict" in check else check
+        pose.load_state_dict(state_dict, strict=True)
     return pose
 
 
