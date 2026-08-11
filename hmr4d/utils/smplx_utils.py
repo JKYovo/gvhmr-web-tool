@@ -5,7 +5,12 @@ import smplx
 import pickle
 from smplx import SMPL, SMPLX, SMPLXLayer
 from hmr4d.utils.body_model import BodyModelSMPLH, BodyModelSMPLX
-from hmr4d.utils.body_model.smplx_lite import SmplxLiteCoco17, SmplxLiteV437Coco17, SmplxLiteSmplN24
+from hmr4d.utils.body_model.smplx_lite import (
+    SmplxLiteCoco17,
+    SmplxLiteSmplN24,
+    SmplxLiteV437Coco17,
+    SmplxLiteV437Coco23,
+)
 from hmr4d import resolve_checkpoint_path
 
 # fmt: off
@@ -15,7 +20,24 @@ SMPLH_PARENTS = torch.tensor([-1,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9
 # fmt: on
 
 
+def _ensure_numpy_legacy_aliases():
+    """Provide aliases needed while unpickling legacy chumpy SMPL assets."""
+    aliases = {
+        "bool": bool,
+        "int": int,
+        "float": float,
+        "complex": complex,
+        "object": object,
+        "unicode": str,
+        "str": str,
+    }
+    for name, value in aliases.items():
+        if name not in np.__dict__:
+            setattr(np, name, value)
+
+
 def make_smplx(type="neu_fullpose", **kwargs):
+    _ensure_numpy_legacy_aliases()
     if type == "neu_fullpose":
         model = smplx.create(
             model_path="inputs/models/smplx/SMPLX_NEUTRAL.npz", use_pca=False, flat_hand_mean=True, **kwargs
@@ -46,6 +68,9 @@ def make_smplx(type="neu_fullpose", **kwargs):
     elif type == "supermotion_v437coco17":
         # Predicts 437 verts and 17 joints
         model = SmplxLiteV437Coco17()
+    elif type == "supermotion_v437coco23":
+        # Predicts 437 verts and COCO17 + 6 foot joints.
+        model = SmplxLiteV437Coco23()
     elif type == "supermotion_smpl24":
         model = SmplxLiteSmplN24()
     elif type == "rich-smplx":

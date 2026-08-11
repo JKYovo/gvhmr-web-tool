@@ -2,7 +2,7 @@
 
 [简体中文 README](README.md)
 
-This repository packages the single-person motion recovery pipeline from [GVHMR](https://github.com/zju3dv/GVHMR) as a deployable local Web tool. Users can upload one video or a batch, inspect persistent jobs, download `hmr4d_results.pt`, and generate camera/world-view previews when needed.
+This repository packages the single-person motion recovery pipeline from [GVHMR](https://github.com/zju3dv/GVHMR) as a deployable local Web tool. Source mode includes GVHMR-Enhanced directly: FootMR ankle refinement is the default and the automatic flat-ground constraint remains optional.
 
 ![GVHMR Web interface](docs/images/gvhmr-web.png)
 
@@ -10,6 +10,8 @@ This repository packages the single-person motion recovery pipeline from [GVHMR]
 
 - Single and batch upload for `mp4 / mov / avi / mkv / webm`
 - Static-camera mode and optional focal length `f_mm`
+- FootMR COCO23 ankle residual refinement with isolated preprocessing caches
+- Optional automatic flat-ground constraint; Human3R scene constraints remain disabled in the Web UI
 - SQLite-backed job history, filtering, cancellation, and retry
 - On-demand previews whose failures do not invalidate motion results
 - In-page preview playback and separate PT, camera-view, global-view, and ZIP downloads
@@ -45,6 +47,16 @@ bash stop_web.sh
 ```
 
 The first launch builds the Docker image and downloads model assets, for a total transfer of roughly `16GB to 17GB`. See the [quick-start guide](docs/QUICKSTART.md) and [deployment guide](docs/DEPLOYMENT.md) for details.
+
+Run the integrated enhanced source backend with:
+
+```bash
+conda activate gvhmr
+python tools/demo/download_footmr_assets.py
+bash start_web_source.sh
+```
+
+Source mode uses this repository as its core by default. Set `GVHMR_CORE_ROOT` only to select another worktree. The Docker path currently retains the original GVHMR baseline.
 
 ## Outputs
 
@@ -98,5 +110,16 @@ Please cite the original paper when using GVHMR research results:
   author={Shen, Zehong and Pi, Huaijin and Xia, Yan and Cen, Zhi and Peng, Sida and Hu, Zechen and Bao, Hujun and Hu, Ruizhen and Zhou, Xiaowei},
   booktitle={SIGGRAPH Asia Conference Proceedings},
   year={2024}
+}
+```
+
+FootMR is used by the default enhanced source backend:
+
+```bibtex
+@InProceedings{wehrbein26footmr,
+  author    = {Wehrbein, Tom and Rosenhahn, Bodo},
+  title     = {Improving 3D Foot Motion Reconstruction in Markerless Monocular Human Motion Capture},
+  booktitle = {IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
+  year      = {2026}
 }
 ```

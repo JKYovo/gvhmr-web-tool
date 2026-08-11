@@ -1,3 +1,11 @@
+FootMR-derived components:
+Copyright 2025-2026 Leibniz University Hannover. All Rights Reserved.
+Source: <https://github.com/twehrbein/FootMR>
+
+This software includes a derivative of FootMR, itself based on GVHMR.
+The following GVHMR license terms apply to the codebase:
+
+-------------------------------------------------------------------
 Copyright 2022-2023 3D Vision Group at the State Key Lab of CAD&CG,  
 Zhejiang University. All Rights Reserved. 
 
@@ -14,3 +22,17 @@ distribute, all copyright, patent, trademark, and attribution notices
 from the source form of this work. 
  
 For commercial uses of this software, please send email to xwzhou@zju.edu.cn
+
+-------------------------------------------------------------------
+Optional CoTracker3 experiment
+
+Source: https://github.com/facebookresearch/co-tracker
+Pinned revision: 82e02e8029753ad4ef13cf06be7f4fc5facdda4d
+
+The majority of upstream CoTracker is licensed under the Creative Commons
+Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0), with
+some upstream portions under separate terms. The complete upstream license
+and notices are retained in third-party/CoTracker. No CoTracker code or
+checkpoint is relicensed under the GVHMR/FootMR terms above. Use of the
+optional CoTracker3 experiment must comply with all applicable upstream
+non-commercial and attribution requirements.

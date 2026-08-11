@@ -216,7 +216,10 @@ def _process(args):
     output_dir = Path(cfg.output_dir)
     preprocess_dir = Path(cfg.preprocess_dir)
     preprocess_dir.mkdir(parents=True, exist_ok=True)
-    _prepare_video_copy(args.video, cfg.video_path)
+    # The enhanced core normalizes the submitted source to 30 FPS from its
+    # timestamps before any preprocessing. Passing the source explicitly
+    # avoids relabeling every decoded frame and slowing down 60 FPS videos.
+    cfg.source_video_path = str(Path(args.video).expanduser().resolve())
 
     result_path = Path(cfg.paths.hmr4d_results)
     if not result_path.is_file():
@@ -226,7 +229,13 @@ def _process(args):
         model: DemoPL = hydra.utils.instantiate(cfg.model, _recursive_=False)
         model.load_pretrained_model(cfg.ckpt_path)
         model = model.eval().cuda()
-        prediction = detach_to_cpu(model.predict(data, static_cam=cfg.static_cam))
+        prediction = detach_to_cpu(
+            model.predict(
+                data,
+                static_cam=cfg.static_cam,
+                no_postproc=cfg.no_postproc,
+            )
+        )
         torch.save(prediction, result_path)
     else:
         Log.info(f"[HMR4D] Reusing cached result at {result_path}")
@@ -302,6 +311,8 @@ def _probe(core_root, checkpoint_root):
         core_checkpoints / "hmr2" / "epoch=10-step=25000.ckpt",
         core_checkpoints / "vitpose" / "vitpose-h-multi-coco.pth",
         core_checkpoints / "yolo" / "yolov8x.pt",
+        core_root / "inputs" / "footmr_assets" / "footmr_checkpoint.ckpt",
+        core_root / "inputs" / "footmr_assets" / "vitpose-h-wholebody.pth",
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:

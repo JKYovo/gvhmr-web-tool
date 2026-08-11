@@ -17,6 +17,7 @@ class NetworkEncoderRoPE(nn.Module):
         # x
         output_dim=151,
         max_len=120,
+        num_2d_joints=17,
         # condition
         cliffcam_dim=3,
         cam_angvel_dim=6,
@@ -31,6 +32,8 @@ class NetworkEncoderRoPE(nn.Module):
         static_conf_dim=6,
         # training
         dropout=0.1,
+        attention_impl="dense",
+        attention_chunk_size=128,
         # other
         avgbeta=True,
     ):
@@ -39,6 +42,7 @@ class NetworkEncoderRoPE(nn.Module):
         # input
         self.output_dim = output_dim
         self.max_len = max_len
+        self.num_2d_joints = num_2d_joints
 
         # condition
         self.cliffcam_dim = cliffcam_dim
@@ -50,14 +54,21 @@ class NetworkEncoderRoPE(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.dropout = dropout
+        if attention_impl not in ("dense", "local"):
+            raise ValueError(f"Unsupported attention implementation: {attention_impl}")
+        self.attention_impl = attention_impl
+        self.attention_chunk_size = attention_chunk_size
 
         # ===== build model ===== #
         # Input (Kp2d)
         # Main token: map d_obs 2 to 32
         self.learned_pos_linear = nn.Linear(2, 32)
-        self.learned_pos_params = nn.Parameter(torch.randn(17, 32), requires_grad=True)
+        self.learned_pos_params = nn.Parameter(torch.randn(self.num_2d_joints, 32), requires_grad=True)
         self.embed_noisyobs = Mlp(
-            17 * 32, hidden_features=self.latent_dim * 2, out_features=self.latent_dim, drop=dropout
+            self.num_2d_joints * 32,
+            hidden_features=self.latent_dim * 2,
+            out_features=self.latent_dim,
+            drop=dropout,
         )
 
         self._build_condition_embedder()
@@ -65,7 +76,14 @@ class NetworkEncoderRoPE(nn.Module):
         # Transformer
         self.blocks = nn.ModuleList(
             [
-                EncoderRoPEBlock(self.latent_dim, self.num_heads, mlp_ratio=mlp_ratio, dropout=dropout)
+                EncoderRoPEBlock(
+                    self.latent_dim,
+                    self.num_heads,
+                    mlp_ratio=mlp_ratio,
+                    dropout=dropout,
+                    attention_impl=attention_impl,
+                    attention_chunk_size=attention_chunk_size,
+                )
                 for _ in range(self.num_layers)
             ]
         )
@@ -118,7 +136,7 @@ class NetworkEncoderRoPE(nn.Module):
             f_cam_angvel: (B, L, 6), Camera angular velocity
         """
         B, L, J, C = obs.shape
-        assert J == 17 and C == 3
+        assert J == self.num_2d_joints and C == 3
 
         # Main token from observation (2D pose)
         obs = obs.clone()
@@ -144,13 +162,16 @@ class NetworkEncoderRoPE(nn.Module):
         pmask = ~length_to_mask(length, L)  # (B, L)
 
         if L > self.max_len:
-            attnmask = torch.ones((L, L), device=x.device, dtype=torch.bool)
-            for i in range(L):
-                min_ind = max(0, i - self.max_len // 2)
-                max_ind = min(L, i + self.max_len // 2)
-                max_ind = max(self.max_len, max_ind)
-                min_ind = min(L - self.max_len, min_ind)
-                attnmask[i, min_ind:max_ind] = False
+            if self.attention_impl == "local":
+                attnmask = ("local", self.max_len)
+            else:
+                attnmask = torch.ones((L, L), device=x.device, dtype=torch.bool)
+                for i in range(L):
+                    min_ind = max(0, i - self.max_len // 2)
+                    max_ind = min(L, i + self.max_len // 2)
+                    max_ind = max(self.max_len, max_ind)
+                    min_ind = min(L - self.max_len, min_ind)
+                    attnmask[i, min_ind:max_ind] = False
         else:
             attnmask = None
 

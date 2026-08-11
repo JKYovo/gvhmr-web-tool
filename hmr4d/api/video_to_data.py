@@ -132,7 +132,10 @@ def build_demo_cfg(output_dir, static_cam, f_mm=None, use_dpvo=False, verbose=Fa
     output_dir = _resolve_path(output_dir)
     with initialize_config_module(version_base="1.3", config_module="hmr4d.configs"):
         register_store_gvhmr()
-        cfg = compose(config_name="demo")
+        # The embedded compatibility runner remains the original GVHMR
+        # baseline. Source-mode Web inference uses this repository's enhanced
+        # external worker and the FootMR `demo` config by default.
+        cfg = compose(config_name="demo_gvhmr")
 
     cfg.video_name = output_dir.name
     cfg.output_root = str(output_dir.parent)

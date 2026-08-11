@@ -142,3 +142,23 @@ def draw_coco17_skeleton_batch(imgs, keypoints_batch, conf_thr=0):
     for i in range(len(imgs)):
         imgs_out.append(draw_coco17_skeleton(imgs[i], keypoints_batch[i], conf_thr))
     return imgs_out
+
+
+def draw_coco23_skeleton(img, keypoints, conf_thr=0):
+    img = draw_coco17_skeleton(img, keypoints[:17], conf_thr)
+    foot_bones = [[15, 17], [15, 18], [15, 19], [16, 20], [16, 21], [16, 22]]
+    for a, b in foot_bones:
+        if keypoints[a, 2] > conf_thr and keypoints[b, 2] > conf_thr:
+            p1 = keypoints[a, :2].astype(int)
+            p2 = keypoints[b, :2].astype(int)
+            img = cv2.line(img, tuple(p1), tuple(p2), (0, 255, 0), 4)
+            img = cv2.circle(img, tuple(p2), 6, (0, 255, 0), -1)
+    return img
+
+
+def draw_coco_skeleton_batch(imgs, keypoints_batch, number_joints, conf_thr=0):
+    assert number_joints in (17, 23)
+    assert len(imgs) == len(keypoints_batch)
+    keypoints_batch = to_numpy(keypoints_batch)
+    draw_fn = draw_coco17_skeleton if number_joints == 17 else draw_coco23_skeleton
+    return [draw_fn(imgs[i], keypoints_batch[i], conf_thr) for i in range(len(imgs))]

@@ -58,10 +58,13 @@ def get_batch(input_path, bbx_xys, img_ds=0.5, img_dst_size=256, path_type="vide
 
 
 class Extractor:
-    def __init__(self, tqdm_leave=True):
+    def __init__(self, tqdm_leave=True, batch_size=16, inference_dtype="fp32"):
         self.extractor: HMR2 = load_hmr2().cuda().eval()
         self.tqdm_leave = tqdm_leave
+        self.batch_size = batch_size
+        self.inference_dtype = inference_dtype
 
+    @torch.inference_mode()
     def extract_video_features(self, video_path, bbx_xys, img_ds=0.5):
         """
         img_ds makes the image smaller, which is useful for faster processing
@@ -75,15 +78,15 @@ class Extractor:
 
         # Inference
         F, _, H, W = imgs.shape  # (F, 3, H, W)
-        imgs = imgs.cuda()
-        batch_size = 16  # 5GB GPU memory, occupies all CUDA cores of 3090
+        batch_size = self.batch_size
+        autocast_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(self.inference_dtype)
         features = []
         for j in tqdm(range(0, F, batch_size), desc="HMR2 Feature", leave=self.tqdm_leave):
-            imgs_batch = imgs[j : j + batch_size]
+            imgs_batch = imgs[j : j + batch_size].cuda(non_blocking=True)
 
-            with torch.no_grad():
+            with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
                 feature = self.extractor({"img": imgs_batch})
-                features.append(feature.detach().cpu())
+                features.append(feature.detach().float().cpu())
 
         features = torch.cat(features, dim=0).clone()  # (F, 1024)
         return features

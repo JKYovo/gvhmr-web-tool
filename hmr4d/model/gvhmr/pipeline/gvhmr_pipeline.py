@@ -30,6 +30,9 @@ from hmr4d.utils.geo.hmr_global import (
 )
 from hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
 from hmr4d.utils.smplx_utils import make_smplx
+from hmr4d.utils.perf import NullProfiler
+from hmr4d.network.footmr.foot_transformer import FootEncoderRoPE
+import hmr4d.utils.matrix as matrix
 
 
 class Pipeline(nn.Module):
@@ -40,6 +43,12 @@ class Pipeline(nn.Module):
 
         # Networks
         self.denoiser3d = instantiate(args_denoiser3d, _recursive_=False)
+        self.use_foot_refiner = bool(getattr(args, "use_foot_refiner", False))
+        if self.use_foot_refiner:
+            self.foot_motion_refiner = FootEncoderRoPE(
+                attention_impl=str(getattr(args, "attention_impl", "dense")),
+                attention_chunk_size=int(getattr(args, "attention_chunk_size", 128)),
+            )
         # Log.info(self.denoiser3d)
 
         # Normalizer
@@ -51,7 +60,8 @@ class Pipeline(nn.Module):
 
     # ========== Training ========== #
 
-    def forward(self, inputs, train=False, postproc=False, static_cam=False):
+    def forward(self, inputs, train=False, postproc=False, static_cam=False, profiler=None):
+        profiler = profiler or NullProfiler()
         outputs = dict()
         length = inputs["length"]  # (B,) effective length of each sample
 
@@ -69,9 +79,19 @@ class Pipeline(nn.Module):
         if train:
             f_condition = randomly_set_null_condition(f_condition, 0.1)
 
+        if self.use_foot_refiner:
+            if train:
+                raise NotImplementedError("This integration supports FootMR inference only")
+            foot_condition = {
+                "obs": inputs["foot_obs"],
+                "f_cliffcam": cliff_cam.clone(),
+            }
+
         # Forward & output
-        model_output = self.denoiser3d(length=length, **f_condition)  # pred_x, pred_cam, static_conf_logits
-        decode_dict = self.endecoder.decode(model_output["pred_x"])  # (B, L, C) -> dict
+        with profiler.section("hmr4d.base_transformer"):
+            model_output = self.denoiser3d(length=length, **f_condition)
+        with profiler.section("hmr4d.decode"):
+            decode_dict = self.endecoder.decode(model_output["pred_x"])
         outputs.update({"model_output": model_output, "decode_dict": decode_dict})
 
         # Post-processing
@@ -81,13 +101,44 @@ class Pipeline(nn.Module):
             "global_orient": decode_dict["global_orient"],  # (B, L, 3)
             "transl": compute_transl_full_cam(model_output["pred_cam"], inputs["bbx_xys"], inputs["K_fullimg"]),
         }
-        if not train:
-            pred_smpl_params_global = get_smpl_params_w_Rt_v2(  # This function has for-loop
-                global_orient_gv=decode_dict["global_orient_gv"],
-                local_transl_vel=decode_dict["local_transl_vel"],
-                global_orient_c=decode_dict["global_orient"],
-                cam_angvel=inputs["cam_angvel"],
+
+        if self.use_foot_refiner:
+            B, L = decode_dict["body_pose"].shape[:2]
+            # Preserve the pre-refinement pose for diagnostics and structural tests.
+            outputs["body_pose_before_foot_refine"] = decode_dict["body_pose"].clone()
+
+            with profiler.section("hmr4d.foot_fk"):
+                with torch.no_grad():
+                    _, _, fk_mat = self.endecoder.fk_v2(
+                        **outputs["pred_smpl_params_incam"], get_intermediate=True
+                    )
+            global_knee_rot = matrix.get_rotation(fk_mat)[:, :, 4:6]
+            global_ankle_rot = matrix.get_rotation(fk_mat)[:, :, 7:9]
+            global_knee_r6d = matrix_to_rotation_6d(global_knee_rot).flatten(-2)
+            global_ankle_r6d = matrix_to_rotation_6d(global_ankle_rot).flatten(-2)
+            foot_condition["global_rot6d"] = torch.cat(
+                [global_knee_r6d, global_ankle_r6d], dim=-1
             )
+
+            with profiler.section("hmr4d.foot_refiner"):
+                pred_global_ankle_r6d = self.foot_motion_refiner(length=length, **foot_condition)
+            global_ankle_rotmat = rotation_6d_to_matrix(
+                pred_global_ankle_r6d.reshape(B, L, 2, 6)
+            )
+            rel_ankle_rotmat = torch.matmul(global_knee_rot.transpose(-2, -1), global_ankle_rotmat)
+            rel_ankle_aa = matrix_to_axis_angle(rel_ankle_rotmat).flatten(-2)
+
+            # SMPL-X body_pose joints 6 and 7 are the left/right ankles.
+            decode_dict["body_pose"][:, :, 6 * 3 : 8 * 3] = rel_ankle_aa
+            outputs["pred_smpl_params_incam"]["body_pose"][:, :, 6 * 3 : 8 * 3] = rel_ankle_aa
+        if not train:
+            with profiler.section("hmr4d.global_rollout"):
+                pred_smpl_params_global = get_smpl_params_w_Rt_v2(
+                    global_orient_gv=decode_dict["global_orient_gv"],
+                    local_transl_vel=decode_dict["local_transl_vel"],
+                    global_orient_c=decode_dict["global_orient"],
+                    cam_angvel=inputs["cam_angvel"],
+                )
             outputs["pred_smpl_params_global"] = {
                 "body_pose": decode_dict["body_pose"],
                 "betas": decode_dict["betas"],
@@ -96,14 +147,18 @@ class Pipeline(nn.Module):
             outputs["static_conf_logits"] = model_output["static_conf_logits"]
 
             if postproc:  # apply post-processing
-                if static_cam:  # extra post-processing to utilize static camera prior
-                    outputs["pred_smpl_params_global"]["transl"] = pp_static_joint_cam(outputs, self.endecoder)
-                else:
-                    outputs["pred_smpl_params_global"]["transl"] = pp_static_joint(outputs, self.endecoder)
-                body_pose = process_ik(outputs, self.endecoder)
-                decode_dict["body_pose"] = body_pose
-                outputs["pred_smpl_params_global"]["body_pose"] = body_pose
-                outputs["pred_smpl_params_incam"]["body_pose"] = body_pose
+                with profiler.section("hmr4d.postprocess"):
+                    if static_cam:  # extra post-processing to utilize static camera prior
+                        outputs["pred_smpl_params_global"]["transl"] = pp_static_joint_cam(outputs, self.endecoder)
+                    else:
+                        outputs["pred_smpl_params_global"]["transl"] = pp_static_joint(outputs, self.endecoder)
+                    body_pose = process_ik(outputs, self.endecoder)
+                    decode_dict["body_pose"] = body_pose
+                    outputs["pred_smpl_params_global"]["body_pose"] = body_pose
+                    # FootMR keeps the camera-space fine-grained ankle refinement;
+                    # global IK post-processing is applied only to global motion.
+                    if not self.use_foot_refiner:
+                        outputs["pred_smpl_params_incam"]["body_pose"] = body_pose
 
             return outputs
 

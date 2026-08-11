@@ -2,7 +2,7 @@
 
 [English README](README.en.md)
 
-把 [GVHMR](https://github.com/zju3dv/GVHMR) 的单人视频人体动作恢复流程封装成一个可部署的本地 Web 工具。使用者可以上传单个或一批视频，查看持久化任务，下载 `hmr4d_results.pt`，并在需要时生成相机视角与世界坐标预览。
+把 [GVHMR](https://github.com/zju3dv/GVHMR) 的单人视频人体动作恢复流程封装成一个可部署的本地 Web 工具。源码模式已经内置 GVHMR-Enhanced：默认使用 FootMR 做脚踝细化，并可选自动平地约束，不再要求旁路安装 `gvhmr-core-opt`。
 
 ![GVHMR Web 界面](docs/images/gvhmr-web.png)
 
@@ -10,6 +10,8 @@
 
 - 单视频与批量上传，支持 `mp4 / mov / avi / mkv / webm`
 - 静态相机和可选焦距 `f_mm`
+- FootMR COCO23 脚踝残差细化，以及隔离的预处理缓存
+- 可选自动平地约束；Human3R 场景约束代码已纳入实验工具，但 Web 中暂不启用
 - SQLite 任务持久化、状态筛选、取消和失败重试
 - 推理完成后按需生成预览，预览失败不会破坏人体动作结果
 - 页面内播放预览，并分别下载 PT、相机视角、全局视角或 ZIP
@@ -45,6 +47,16 @@ bash stop_web.sh
 ```
 
 第一次启动会构建 Docker 镜像并下载模型，总下载量约 `16GB ~ 17GB`。完整说明见 [快速开始](docs/QUICKSTART.md) 和 [部署说明](docs/DEPLOYMENT.md)。
+
+要运行当前内置的 GVHMR-Enhanced，请使用已有的 `gvhmr` Conda 环境：
+
+```bash
+conda activate gvhmr
+python tools/demo/download_footmr_assets.py
+bash start_web_source.sh
+```
+
+源码启动默认以当前仓库作为算法 core；只有需要切换其他 worktree 时才设置 `GVHMR_CORE_ROOT`。Docker 启动路径目前仍保留原始 GVHMR baseline。
 
 ## 输出内容
 
@@ -98,5 +110,16 @@ runtime/jobs/<视频名>_<任务短 ID>/
   author={Shen, Zehong and Pi, Huaijin and Xia, Yan and Cen, Zhi and Peng, Sida and Hu, Zechen and Bao, Hujun and Hu, Ruizhen and Zhou, Xiaowei},
   booktitle={SIGGRAPH Asia Conference Proceedings},
   year={2024}
+}
+```
+
+源码模式默认启用的脚踝细化来自 FootMR：
+
+```bibtex
+@InProceedings{wehrbein26footmr,
+  author    = {Wehrbein, Tom and Rosenhahn, Bodo},
+  title     = {Improving 3D Foot Motion Reconstruction in Markerless Monocular Human Motion Capture},
+  booktitle = {IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
+  year      = {2026}
 }
 ```

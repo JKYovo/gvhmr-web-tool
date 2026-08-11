@@ -7,7 +7,7 @@ ENV_NAME="${GVHMR_CONDA_ENV:-gvhmr}"
 HOST="${GVHMR_HOST:-127.0.0.1}"
 PID_FILE="${ROOT_DIR}/runtime/gvhmr_web.pid"
 LOG_FILE="${ROOT_DIR}/runtime/gvhmr_web.log"
-DEFAULT_CORE_ROOT="${ROOT_DIR}/../gvhmr-core-opt"
+DEFAULT_CORE_ROOT="${ROOT_DIR}"
 CORE_ROOT="${GVHMR_CORE_ROOT:-}"
 
 if [[ -z "${CONDA_BIN}" ]]; then

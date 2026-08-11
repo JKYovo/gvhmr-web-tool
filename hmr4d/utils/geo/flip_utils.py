@@ -19,6 +19,19 @@ def flip_heatmap_coco17(output_flipped):
     return output_flipped_back
 
 
+def flip_heatmap_coco23(output_flipped):
+    """Undo a horizontal flip for COCO17 + six whole-body foot landmarks."""
+    assert output_flipped.ndim == 4 and output_flipped.shape[1] == 23
+    output_flipped_back = output_flipped.clone()
+    for left, right in [
+        [1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16],
+        [17, 20], [18, 21], [19, 22],
+    ]:
+        output_flipped_back[:, left] = output_flipped[:, right]
+        output_flipped_back[:, right] = output_flipped[:, left]
+    return output_flipped_back.flip(3)
+
+
 def flip_bbx_xys(bbx_xys, w):
     """
     bbx_xys: (F, 3)
