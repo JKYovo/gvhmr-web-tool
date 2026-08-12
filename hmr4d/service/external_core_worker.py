@@ -82,24 +82,13 @@ def _build_cfg(output_dir, *, static_cam, f_mm=None, use_dpvo=False, verbose=Fal
 
 
 def _prepare_video_copy(source_path, destination_path):
-    from hmr4d.utils.video_io_utils import get_video_lwh, get_video_reader, get_writer
+    from hmr4d.utils.video_io_utils import normalize_video_fps
 
     source_path = Path(source_path).expanduser().resolve()
     destination_path = Path(destination_path).expanduser().resolve()
     if source_path == destination_path:
         return destination_path
-    if destination_path.is_file() and get_video_lwh(source_path)[0] == get_video_lwh(destination_path)[0]:
-        return destination_path
-
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    reader = get_video_reader(source_path)
-    writer = get_writer(destination_path, fps=30, crf=CRF)
-    try:
-        for frame in reader:
-            writer.write_frame(frame)
-    finally:
-        writer.close()
-        reader.close()
+    normalize_video_fps(source_path, destination_path, target_fps=30, crf=CRF)
     return destination_path
 
 
@@ -132,13 +121,13 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
     if not raw_path.is_file():
         shutil.copy2(result_path, raw_path)
 
-    constraint_dir = output_dir / "ground_constraint_flat_y"
+    constraint_dir = output_dir / "ground_constraint_global_v1_1"
     constraint_dir.mkdir(parents=True, exist_ok=True)
-    enhanced_path = constraint_dir / "contact_floor_y_hmr4d_results.pt"
+    enhanced_path = constraint_dir / "contact_global_root_hmr4d_results.pt"
     metrics_path = constraint_dir / "metrics.json"
-    script = core_root / "tools" / "bench" / "human3r_p2y" / "apply_contact_floor_y.py"
+    script = core_root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py"
     if not script.is_file():
-        raise FileNotFoundError(f"Contact-floor-Y postprocessor not found: {script}")
+        raise FileNotFoundError(f"Contact global V1.1 postprocessor not found: {script}")
 
     error = None
     if not enhanced_path.is_file():
@@ -151,9 +140,6 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
             str(video_path),
             "--output-dir",
             str(constraint_dir),
-            "--smoothing-seconds",
-            "0.5",
-            "--allow-large-correction",
         ]
         completed = subprocess.run(
             command,
@@ -167,35 +153,93 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
             error = completed.stdout.strip() or f"exit code {completed.returncode}"
 
     decision = None
+    metrics = None
     if metrics_path.is_file():
         try:
-            decision = json.loads(metrics_path.read_text(encoding="utf-8")).get("decision")
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            decision = metrics.get("decision")
         except (OSError, ValueError):
             decision = None
 
     if error is None and decision == "diagnostic_pass" and enhanced_path.is_file():
         shutil.copy2(enhanced_path, result_path)
-        print("[Ground Constraint] Shared contact-floor-Y applied; raw tensor preserved.", flush=True)
+        print("[Ground Constraint] Contact global V1.1 applied; raw tensor preserved.", flush=True)
         return {
             "ground_constraint": "flat_y",
             "ground_constraint_status": "applied",
             "raw_hmr4d_results_path": str(raw_path.resolve()),
-            "flat_ground_y_results_path": str(enhanced_path.resolve()),
+            "global_contact_results_path": str(enhanced_path.resolve()),
             "ground_constraint_metrics_path": str(metrics_path.resolve()),
         }
 
     shutil.copy2(raw_path, result_path)
-    reason = error or f"guardrail decision: {decision or 'missing'}"
-    print(f"[Ground Constraint] Shared contact-floor-Y fallback to raw result: {reason}", flush=True)
+    reason = error or _ground_constraint_fallback_reason(metrics, decision)
+    print(f"[Ground Constraint] Contact global V1.1 fallback to raw result: {reason}", flush=True)
     payload = {
         "ground_constraint": "flat_y",
         "ground_constraint_status": "fallback",
         "ground_constraint_error": reason,
+        "ground_constraint_fallback_reason": reason,
         "raw_hmr4d_results_path": str(raw_path.resolve()),
     }
     if metrics_path.is_file():
         payload["ground_constraint_metrics_path"] = str(metrics_path.resolve())
     return payload
+
+
+def _ground_constraint_fallback_reason(metrics, decision):
+    if decision != "guardrail_failed" or not isinstance(metrics, dict):
+        return f"保护条件结果：{decision or '指标缺失或损坏'}"
+    failed = metrics.get("failed_guardrails")
+    if not isinstance(failed, list):
+        failed = [
+            key
+            for key, passed in metrics.get("guardrails", {}).items()
+            if passed is False
+        ]
+    details = metrics.get("guardrail_details", {})
+    labels = {
+        "horizontal_correction_pass": "水平修正过大",
+        "vertical_correction_pass": "垂直修正过大",
+        "root_step_pass": "root 单帧跳变过大",
+        "root_acceleration_pass": "root 加速度增幅过大",
+        "slip_improved": "脚滑指标未同时改善",
+        "height_improved": "悬空/穿地指标未同时改善",
+    }
+
+    def number(values, key, unit=""):
+        value = values.get(key) if isinstance(values, dict) else None
+        return f"{value:.4g}{unit}" if isinstance(value, (int, float)) else "?"
+
+    reasons = []
+    for key in failed:
+        values = details.get(key, {}) if isinstance(details, dict) else {}
+        if key == "horizontal_correction_pass":
+            suffix = f"（实际 {number(values, 'actual_m', 'm')}，上限 {number(values, 'limit_m', 'm')}）"
+        elif key == "vertical_correction_pass":
+            suffix = f"（实际 {number(values, 'actual_m', 'm')}，上限 {number(values, 'limit_m', 'm')}）"
+        elif key == "root_step_pass":
+            suffix = f"（实际 {number(values, 'actual_cm_per_frame', 'cm/帧')}，上限 {number(values, 'limit_cm_per_frame', 'cm/帧')}）"
+        elif key == "root_acceleration_pass":
+            suffix = f"（P95 实际 {number(values, 'actual_m_per_s2_p95', 'm/s²')}，上限 {number(values, 'limit_m_per_s2_p95', 'm/s²')}）"
+        elif key == "slip_improved":
+            suffix = (
+                f"（接触速度 P95 {number(values, 'anchor_speed_before_mm_per_frame_p95')}→"
+                f"{number(values, 'anchor_speed_after_mm_per_frame_p95')}mm/帧；段漂移 P95 "
+                f"{number(values, 'endpoint_drift_before_cm_p95')}→"
+                f"{number(values, 'endpoint_drift_after_cm_p95')}cm）"
+            )
+        elif key == "height_improved":
+            suffix = (
+                f"（支撑高度 P95 {number(values, 'support_height_before_cm_p95')}→"
+                f"{number(values, 'support_height_after_cm_p95')}cm；悬空 "
+                f"{number(values, 'hover_before_pct')}→{number(values, 'hover_after_pct')}%；穿地 "
+                f"{number(values, 'penetration_before_pct')}→{number(values, 'penetration_after_pct')}%）"
+            )
+        else:
+            suffix = ""
+        reasons.append(f"{labels.get(key, key)}{suffix}")
+    return "；".join(reasons) if reasons else "保护条件未通过（未记录具体失败项）"
 
 
 def _process(args):

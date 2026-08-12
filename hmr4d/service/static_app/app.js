@@ -103,8 +103,11 @@ function hasArtifact(job, key) {
   const map = {
     hmr4d_results: artifacts.hmr4d_results_path,
     raw_hmr4d_results: artifacts.raw_hmr4d_results_path,
+    global_contact_results: artifacts.global_contact_results_path,
     flat_ground_y_results: artifacts.flat_ground_y_results_path,
     ground_constraint_metrics: artifacts.ground_constraint_metrics_path,
+    sonic_reference: artifacts.sonic_reference_path,
+    sonic_metadata: artifacts.sonic_metadata_path,
     incam_video: artifacts.incam_video_path,
     global_video: artifacts.global_video_path,
     preview_video: artifacts.preview_video_path,
@@ -273,7 +276,8 @@ async function submitBatch(event) {
 
 function jobNeedsPolling(job) {
   return ["queued", "running"].includes(job?.status)
-    || ["queued", "running"].includes(job?.preview_status);
+    || ["queued", "running"].includes(job?.preview_status)
+    || ["preparing", "streaming"].includes(job?.sonic_status);
 }
 
 function currentProgress(job) {
@@ -437,7 +441,10 @@ function renderDownloads(job) {
   const items = [
     ["hmr4d_results", "当前动作结果 PT"],
     ["raw_hmr4d_results", "原始 FootMR PT"],
+    ["global_contact_results", "Global V1.1 结果 PT"],
     ["ground_constraint_metrics", "地面约束指标 JSON"],
+    ["sonic_reference", "SONIC Reference NPZ"],
+    ["sonic_metadata", "SONIC 转换信息 JSON"],
     ["preview_video", "对比预览 MP4"],
     ["incam_video", "相机视角 MP4"],
     ["global_video", "全局视角 MP4"],
@@ -547,11 +554,38 @@ function actionHint(job) {
   if (job.status === "running") return { text: "GVHMR 正在处理视频，取消请求会在当前阶段结束后生效。", kind: "warning" };
   if (job.status === "failed") return { text: `处理失败：${job.error_summary || "请查看任务日志"}`, kind: "error" };
   if (job.status === "cancelled") return { text: "任务已取消，可以修改设置后重试。", kind: "warning" };
+  if (job.ground_constraint_status === "fallback") {
+    return {
+      text: `自动平地已回退原始 FootMR：${job.ground_constraint_fallback_reason || job.ground_constraint_error || "保护条件未通过"}`,
+      kind: "warning",
+    };
+  }
   if (job.preview_status === "running" || job.preview_status === "queued") {
     return { text: "人体动作结果已经可用，预览视频正在后台生成。", kind: "" };
   }
   if (job.preview_status === "failed") {
     return { text: `动作结果未受影响；预览失败：${job.preview_error_summary || "请查看日志"}`, kind: "error" };
+  }
+  if (job.sonic_status === "preparing") {
+    return { text: "正在准备本地 SONIC 推流。", kind: "warning" };
+  }
+  if (job.sonic_status === "streaming") {
+    return {
+      text: `正在推流到 SONIC：${job.sonic_frame || 0} / ${job.sonic_frames || 0} 帧。`,
+      kind: "warning",
+    };
+  }
+  if (job.sonic_status === "complete") {
+    return { text: "Web 端已完成该动作的 SONIC 推流。", kind: "" };
+  }
+  if (job.sonic_status === "stopped") {
+    return { text: "该动作的 SONIC 推流已停止或被新动作替换。", kind: "warning" };
+  }
+  if (job.sonic_status === "paused") {
+    return { text: "SONIC 已暂停，策略正在平滑回到默认姿态。", kind: "" };
+  }
+  if (job.sonic_status === "error") {
+    return { text: `SONIC 推流失败：${job.sonic_error || "请查看任务日志"}`, kind: "error" };
   }
   if (hasArtifact(job, "preview_video")) return { text: "动作结果和预览均已生成，可以播放或下载。", kind: "" };
   return { text: "动作结果已生成，可以下载 PT，或按需生成预览视频。", kind: "" };
@@ -563,6 +597,8 @@ function renderActions(job) {
   const retryButton = $("retryBtn");
   const cancelButton = $("cancelBtn");
   const toGmrButton = $("toGmrBtn");
+  const toSonicButton = $("toSonicBtn");
+  const pauseSonicButton = $("pauseSonicBtn");
   const isSucceeded = job?.status === "succeeded";
   const previewBusy = ["queued", "running"].includes(job?.preview_status);
 
@@ -586,6 +622,17 @@ function renderActions(job) {
     && hasArtifact(job, "hmr4d_results");
   toGmrButton.hidden = !canUseGmr;
   toGmrButton.disabled = state.activeAction === "to-gmr";
+
+  const canUseSonic = Boolean(state.capabilities?.sonic_bridge_available)
+    && isSucceeded
+    && hasArtifact(job, "hmr4d_results");
+  const sonicBusy = ["preparing", "streaming"].includes(job?.sonic_status);
+  toSonicButton.hidden = !canUseSonic;
+  toSonicButton.disabled = state.activeAction === "to-sonic";
+  toSonicButton.textContent = sonicBusy ? "重新发送到 SONIC" : "发送到 SONIC";
+  pauseSonicButton.hidden = !sonicBusy;
+  pauseSonicButton.disabled = state.activeAction === "pause-sonic";
+  pauseSonicButton.textContent = state.activeAction === "pause-sonic" ? "正在暂停" : "暂停 SONIC";
 }
 
 function renderJobProgress(job) {
@@ -610,7 +657,11 @@ function renderJobDetail(job) {
     $("logs").textContent = "暂无日志";
     $("jobJson").textContent = "{}";
   } else {
-    const error = job.error_summary || job.preview_error_summary || "-";
+    const error = job.error_summary
+      || job.preview_error_summary
+      || job.ground_constraint_fallback_reason
+      || job.ground_constraint_error
+      || "-";
     $("detailHint").textContent = `${fileName(job)} · ${job.job_id}`;
     $("jobMetrics").innerHTML = [
       metric("状态", statusLabel(job.status)),
@@ -726,6 +777,37 @@ async function toGmrSelected() {
   });
 }
 
+async function toSonicSelected() {
+  if (!state.selectedJobId) return showToast("请先选择任务。", true);
+  await runAction("to-sonic", async () => {
+    try {
+      const result = await request(`jobs/${state.selectedJobId}/to-sonic`, { method: "POST" });
+      const duration = Number(result.duration_s || 0).toFixed(2);
+      showToast(
+        `已开始 SONIC 推流：${result.frames} 帧 / ${duration} 秒` +
+        `${result.reused ? "（复用已转换数据）" : ""}`,
+      );
+      await refreshJobs();
+      ensurePolling();
+    } catch (error) {
+      showToast(`SONIC 推流失败：${error.message}`, true);
+    }
+  });
+}
+
+async function pauseSonicSelected() {
+  if (!state.selectedJobId) return showToast("请先选择任务。", true);
+  await runAction("pause-sonic", async () => {
+    try {
+      await request(`jobs/${state.selectedJobId}/sonic/pause`, { method: "POST" });
+      showToast("SONIC 已暂停，正在平滑回到默认姿态。");
+      await refreshJobs();
+    } catch (error) {
+      showToast(`暂停 SONIC 失败：${error.message}`, true);
+    }
+  });
+}
+
 function closeDetailPopovers(except = null) {
   document.querySelectorAll("#detailPanel .detail-secondary details[open]").forEach((details) => {
     if (details !== except) details.open = false;
@@ -774,6 +856,8 @@ async function boot() {
   $("retryBtn").addEventListener("click", retrySelected);
   $("cancelBtn").addEventListener("click", cancelSelected);
   $("toGmrBtn").addEventListener("click", toGmrSelected);
+  $("toSonicBtn").addEventListener("click", toSonicSelected);
+  $("pauseSonicBtn").addEventListener("click", pauseSonicSelected);
   $("previewVideo").addEventListener("loadedmetadata", () => {
     const video = $("previewVideo");
     fitPreviewStage();

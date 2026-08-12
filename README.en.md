@@ -2,7 +2,7 @@
 
 [简体中文 README](README.md)
 
-This repository packages the single-person motion recovery pipeline from [GVHMR](https://github.com/zju3dv/GVHMR) as a deployable local Web tool. Source mode includes GVHMR-Enhanced directly: FootMR ankle refinement is the default and the automatic flat-ground constraint remains optional.
+This repository packages the single-person motion recovery pipeline from [GVHMR](https://github.com/zju3dv/GVHMR) as a deployable local Web tool. Source mode includes GVHMR-Enhanced directly: FootMR ankle refinement is the default, with Contact-aware Global Optimizer V1.1 available as the automatic flat-ground constraint.
 
 ![GVHMR Web interface](docs/images/gvhmr-web.png)
 
@@ -11,7 +11,8 @@ This repository packages the single-person motion recovery pipeline from [GVHMR]
 - Single and batch upload for `mp4 / mov / avi / mkv / webm`
 - Static-camera mode and optional focal length `f_mm`
 - FootMR COCO23 ankle residual refinement with isolated preprocessing caches
-- Optional automatic flat-ground constraint; Human3R scene constraints remain disabled in the Web UI
+- Optional Contact Global V1.1 flat-ground constraint using continuous toe/heel contacts and a sequence-wide root XYZ solve
+- Human3R scene constraints remain disabled in the Web UI
 - SQLite-backed job history, filtering, cancellation, and retry
 - On-demand previews whose failures do not invalidate motion results
 - In-page preview playback and separate PT, camera-view, global-view, and ZIP downloads
@@ -68,9 +69,46 @@ runtime/jobs/<video-name>_<short-job-id>/
 
 Core artifacts:
 
-- `hmr4d_results.pt`: GVHMR motion result
+- `hmr4d_results.pt`: published result; Global V1.1 when enabled and accepted by its guardrails, otherwise raw FootMR
+- `hmr4d_results_raw.pt`: preserved raw FootMR result when the constraint is enabled
+- `ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt`: accepted V1.1 candidate
+- `ground_constraint_global_v1_1/metrics.json`: contacts, corrections, guardrails, and final decision
 - `job.json`: job summary
 - `artifacts.zip`: bundle of currently available outputs
+
+The automatic constraint runs once from the raw FootMR tensor and only changes `smpl_params_global.transl`; the former local-Y postprocessor is no longer chained into new tasks. A V1.1 failure or guardrail rejection falls back directly to `hmr4d_results_raw.pt`. The UI/API value remains `flat_y` for compatibility, but now denotes Global V1.1.
+
+## SONIC integration without Kimodo
+
+This repository now includes the SMPL-X22-to-SONIC conversion and local ZMQ
+playback adapter. Both run in the `gvhmr` Conda environment and no longer
+require a Kimodo checkout, Kimodo virtual environment, or PEFT. For a
+successful job, click **Send to SONIC** in the detail actions. It generates or
+reuses the 50 FPS reference from the final `hmr4d_results.pt` and streams it in
+the background without replacing the motion result. While streaming, **Pause
+SONIC** stops the live reference; the SONIC policy then blends back to its
+built-in idle/default reference instead of holding the final motion frame. The
+CLI remains available:
+
+```bash
+conda run -n gvhmr python tools/sonic/convert_gvhmr.py \
+  runtime/jobs/<job>/hmr4d_results.pt \
+  runtime/jobs/<job>/sonic_reference.npz \
+  --metadata runtime/jobs/<job>/sonic_conversion.json
+
+conda run -n gvhmr python tools/sonic/play_reference.py \
+  runtime/jobs/<job>/sonic_reference.npz
+```
+
+Conversion is read-only with respect to the Web result. The conversion CLI
+does not connect to SONIC, while the Web button does. The 50 FPS
+`term1_local`, `root_quat`, `wrist`, and protocol path
+were verified element-for-element against the previous Kimodo outputs for
+jntm, lly, cxk, qhy, and ydd, with maximum array difference zero. This proves
+input compatibility only; it does not address policy tracking or robot joint
+limits. The current ZMQ PUB protocol has no acknowledgement, so “streaming
+complete” means the Web publisher finished sending—not that SONIC confirmed
+receipt. Start SONIC/MuJoCo before clicking the button.
 
 On-demand previews:
 

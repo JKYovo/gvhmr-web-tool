@@ -17,6 +17,8 @@ uvicorn
 python-multipart
 httpx
 numpy==1.23.5
+scipy==1.15.3  # SONIC SO(3) resampling; pinned to the bit-exact validated path
+pyzmq  # Local SONIC reference playback
 jupyter
 matplotlib
 ipdb

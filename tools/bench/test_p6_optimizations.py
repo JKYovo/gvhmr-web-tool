@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from hmr4d.network.base_arch.transformer.encoder_rope import RoPEAttention
+from hmr4d.api.video_to_data import _prepare_video_copy
 from hmr4d.utils.perf import StageProfiler
 from hmr4d.utils.preproc.content_cache import PreprocessContentCache
 from hmr4d.utils.video_io_utils import get_video_fps_duration, get_video_lwh, get_writer, normalize_video_fps
@@ -54,6 +55,35 @@ def test_video_normalization(temporary_dir):
     assert abs(duration - metadata["source_duration"]) <= 0.05
 
 
+def test_web_replaces_stale_relabelled_video(temporary_dir):
+    source = temporary_dir / "web_source_60fps.mp4"
+    output = temporary_dir / "0_input_video.mp4"
+
+    source_writer = get_writer(source, fps=60, crf=17)
+    stale_writer = get_writer(output, fps=30, crf=17)
+    for frame_id in range(60):
+        frame = np.full((32, 48, 3), frame_id * 4, dtype=np.uint8)
+        source_writer.write_frame(frame)
+        # Reproduce the old bug: keep every frame and only label it 30 FPS.
+        stale_writer.write_frame(frame)
+    source_writer.close()
+    stale_writer.close()
+
+    stale_fps, stale_duration = get_video_fps_duration(output)
+    assert stale_fps == 30
+    assert get_video_lwh(output)[0] == 60
+    assert stale_duration > 1.9
+
+    _prepare_video_copy(source, output)
+
+    source_fps, source_duration = get_video_fps_duration(source)
+    output_fps, output_duration = get_video_fps_duration(output)
+    assert source_fps == 60
+    assert output_fps == 30
+    assert get_video_lwh(output)[0] == 30
+    assert abs(output_duration - source_duration) <= 0.05
+
+
 def test_content_cache(temporary_dir):
     video = temporary_dir / "video.bin"
     video.write_bytes(b"content-addressed-video")
@@ -85,6 +115,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="gvhmr-p6-test-") as directory:
         root = Path(directory)
         test_video_normalization(root)
+        test_web_replaces_stale_relabelled_video(root)
         test_content_cache(root)
         test_profiler(root)
     test_local_attention()

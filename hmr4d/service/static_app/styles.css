@@ -905,35 +905,45 @@ pre {
 
 @media (min-width: 981px) and (min-height: 720px) {
   body {
-    height: 100vh;
-    overflow: hidden;
+    min-height: 100vh;
+    overflow-y: auto;
   }
 
   .shell {
     display: grid;
-    height: 100vh;
-    grid-template-rows: auto minmax(0, 1fr);
+    min-height: 100vh;
+    grid-template-rows: auto minmax(740px, 1fr);
     gap: 10px;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .layout {
-    min-height: 0;
-    grid-template-rows: minmax(310px, .82fr) minmax(340px, 1.18fr);
+    min-height: 740px;
+    grid-template-rows: 390px minmax(340px, 1fr);
     align-items: stretch;
   }
 
   .left,
-  .right,
+  .right {
+    display: flex;
+    min-height: 0;
+    height: auto;
+  }
+
   .process-panel,
-  .task-console,
+  .task-console {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+  }
+
   .detail-panel {
     min-height: 0;
-    height: 100%;
+    height: auto;
   }
 
   .process-panel {
-    overflow: auto;
+    overflow: visible;
   }
 
   .task-console {

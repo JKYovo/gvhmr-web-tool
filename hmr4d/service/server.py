@@ -216,8 +216,11 @@ def _artifact_path(job, artifact_key):
         "meta": artifacts.get("meta_path"),
         "hmr4d_results": artifacts.get("hmr4d_results_path"),
         "raw_hmr4d_results": artifacts.get("raw_hmr4d_results_path"),
+        "global_contact_results": artifacts.get("global_contact_results_path"),
         "flat_ground_y_results": artifacts.get("flat_ground_y_results_path"),
         "ground_constraint_metrics": artifacts.get("ground_constraint_metrics_path"),
+        "sonic_reference": artifacts.get("sonic_reference_path"),
+        "sonic_metadata": artifacts.get("sonic_metadata_path"),
         "incam_video": artifacts.get("incam_video_path"),
         "global_video": artifacts.get("global_video_path"),
         "preview_video": artifacts.get("preview_video_path"),
@@ -263,13 +266,17 @@ def _ground_constraint_capabilities(runtime):
     flat_y_available = bool(
         core.get("ready")
         and root is not None
-        and (root / "tools" / "bench" / "human3r_p2y" / "apply_contact_floor_y.py").is_file()
+        and (root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py").is_file()
     )
     return {
         "default": "flat_y" if flat_y_available else "none",
         "options": [
             {"value": "none", "label": "不启用", "enabled": True},
-            {"value": "flat_y", "label": "自动平地约束", "enabled": flat_y_available},
+            {
+                "value": "flat_y",
+                "label": "自动平地约束（Global V1.1）",
+                "enabled": flat_y_available,
+            },
             {
                 "value": "human3r",
                 "label": "Human3R 场景约束",
@@ -336,6 +343,7 @@ def create_gvhmr_app(manager, settings, *, submit_to_gmr=None, manage_lifecycle=
                 "db_path": str(settings.db_path),
             },
             "gmr_bridge_available": submit_to_gmr is not None,
+            "sonic_bridge_available": True,
             "runtime": runtime,
         }
 
@@ -516,6 +524,26 @@ def create_gvhmr_app(manager, settings, *, submit_to_gmr=None, manage_lifecycle=
         try:
             return submit_to_gmr(job_id)
         except (RuntimeError, FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/jobs/{job_id}/to-sonic")
+    def submit_job_to_sonic(job_id: str):
+        try:
+            result = manager.send_to_sonic(job_id)
+            if result is None:
+                raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+            return result
+        except (RuntimeError, FileNotFoundError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/jobs/{job_id}/sonic/pause")
+    def pause_job_sonic(job_id: str):
+        try:
+            result = manager.pause_sonic(job_id)
+            if result is None:
+                raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+            return result
+        except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/batches")

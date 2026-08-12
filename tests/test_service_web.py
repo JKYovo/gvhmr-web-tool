@@ -9,6 +9,7 @@ from queue import Empty
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import torch
 from fastapi.testclient import TestClient
 
 from hmr4d.api.video_to_data import _ensure_chumpy_numpy_compat
@@ -20,7 +21,7 @@ from hmr4d.service.external_core_worker import (
     _merge_preview_videos,
 )
 from hmr4d.service.manager import JobManager, _progress_from_log
-from hmr4d.service.server import create_gvhmr_app
+from hmr4d.service.server import _ground_constraint_capabilities, create_gvhmr_app
 from hmr4d.service.store import SQLiteJobStore
 
 
@@ -53,6 +54,35 @@ class RecoveringPreviewRunner:
             "global_video_path": str(global_video),
             "preview_video_path": str(preview),
         }
+
+
+class CompletingSonicController:
+    def __init__(self):
+        self.run_calls = 0
+        self.closed = False
+
+    def run(self, _client_id, reference, callback):
+        from hmr4d.utils.sonic import PlaybackState
+
+        self.run_calls += 1
+        callback(PlaybackState.PREPARING, 0, reference.frame_count, None)
+        callback(PlaybackState.STREAMING, reference.frame_count, reference.frame_count, None)
+        callback(PlaybackState.COMPLETE, reference.frame_count, reference.frame_count, None)
+
+    def close(self):
+        self.closed = True
+
+
+class PausableSonicController:
+    def __init__(self):
+        self.stop_calls = 0
+
+    def stop(self, client_id):
+        self.stop_calls += 1
+        return client_id == 0
+
+    def close(self):
+        pass
 
 
 class ServiceWebTest(unittest.TestCase):
@@ -131,9 +161,9 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(disabled.status_code, 400, disabled.text)
         self.assertIn("not enabled", disabled.json()["detail"])
 
-    def test_contact_floor_postprocess_preserves_raw_and_selects_enhanced(self):
+    def test_contact_global_v1_1_preserves_raw_and_selects_enhanced(self):
         root = Path(self.temp_dir.name) / "flat-core"
-        script = root / "tools" / "bench" / "human3r_p2y" / "apply_contact_floor_y.py"
+        script = root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py"
         script.parent.mkdir(parents=True)
         script.write_text(
             "import argparse, json\n"
@@ -142,10 +172,8 @@ class ServiceWebTest(unittest.TestCase):
             "p.add_argument('--gvhmr-result')\n"
             "p.add_argument('--video')\n"
             "p.add_argument('--output-dir')\n"
-            "p.add_argument('--smoothing-seconds')\n"
-            "p.add_argument('--allow-large-correction', action='store_true')\n"
             "a=p.parse_args(); out=Path(a.output_dir); out.mkdir(parents=True, exist_ok=True)\n"
-            "(out/'contact_floor_y_hmr4d_results.pt').write_bytes(b'enhanced')\n"
+            "(out/'contact_global_root_hmr4d_results.pt').write_bytes(b'enhanced')\n"
             "(out/'metrics.json').write_text(json.dumps({'decision':'diagnostic_pass'}))\n",
             encoding="utf-8",
         )
@@ -161,6 +189,76 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(result["ground_constraint_status"], "applied")
         self.assertEqual(selected.read_bytes(), b"enhanced")
         self.assertEqual((output / "hmr4d_results_raw.pt").read_bytes(), b"raw")
+        self.assertIn("global_contact_results_path", result)
+        self.assertNotIn("flat_ground_y_results_path", result)
+
+    def test_contact_global_failure_restores_raw_without_calling_legacy_local_y(self):
+        root = Path(self.temp_dir.name) / "fallback-core"
+        script_dir = root / "tools" / "bench" / "human3r_p2y"
+        script_dir.mkdir(parents=True)
+        (script_dir / "apply_contact_global_root.py").write_text(
+            "raise SystemExit('global optimizer failed')\n",
+            encoding="utf-8",
+        )
+        (script_dir / "apply_contact_floor_y.py").write_text(
+            "from pathlib import Path\nPath('legacy_was_called').write_text('called')\n",
+            encoding="utf-8",
+        )
+        output = root / "output"
+        output.mkdir()
+        selected = output / "hmr4d_results.pt"
+        selected.write_bytes(b"legacy-enhanced")
+        (output / "hmr4d_results_raw.pt").write_bytes(b"raw")
+        video = output / "0_input_video.mp4"
+        video.write_bytes(b"video")
+
+        result = _apply_ground_constraint(root, output, video, selected, "flat_y")
+
+        self.assertEqual(result["ground_constraint_status"], "fallback")
+        self.assertEqual(selected.read_bytes(), b"raw")
+        self.assertFalse((root / "legacy_was_called").exists())
+        self.assertFalse((output / "ground_constraint_flat_y").exists())
+
+    def test_contact_global_guardrail_fallback_reports_failed_values(self):
+        root = Path(self.temp_dir.name) / "guardrail-core"
+        script = root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "import argparse, json\n"
+            "from pathlib import Path\n"
+            "p=argparse.ArgumentParser(); p.add_argument('--gvhmr-result'); "
+            "p.add_argument('--video'); p.add_argument('--output-dir'); a=p.parse_args()\n"
+            "out=Path(a.output_dir); out.mkdir(parents=True, exist_ok=True)\n"
+            "(out/'contact_global_root_hmr4d_results.pt').write_bytes(b'candidate')\n"
+            "(out/'metrics.json').write_text(json.dumps({"
+            "'decision':'guardrail_failed',"
+            "'guardrails':{'horizontal_correction_pass':False,'height_improved':False},"
+            "'failed_guardrails':['horizontal_correction_pass','height_improved'],"
+            "'guardrail_details':{"
+            "'horizontal_correction_pass':{'actual_m':0.42,'limit_m':0.35},"
+            "'height_improved':{'support_height_before_cm_p95':4.0,"
+            "'support_height_after_cm_p95':4.5,'hover_before_pct':10.0,"
+            "'hover_after_pct':12.0,'penetration_before_pct':1.0,"
+            "'penetration_after_pct':1.0}}}))\n",
+            encoding="utf-8",
+        )
+        output = root / "output"
+        output.mkdir()
+        selected = output / "hmr4d_results.pt"
+        selected.write_bytes(b"raw")
+        video = output / "0_input_video.mp4"
+        video.write_bytes(b"video")
+
+        result = _apply_ground_constraint(root, output, video, selected, "flat_y")
+
+        self.assertEqual(result["ground_constraint_status"], "fallback")
+        reason = result["ground_constraint_fallback_reason"]
+        self.assertIn("水平修正过大", reason)
+        self.assertIn("0.42m", reason)
+        self.assertIn("0.35m", reason)
+        self.assertIn("悬空/穿地指标未同时改善", reason)
+        self.assertEqual(result["ground_constraint_error"], reason)
+        self.assertEqual(selected.read_bytes(), b"raw")
 
     def test_output_directory_uses_timestamp_and_avoids_collisions(self):
         root = Path(self.temp_dir.name) / "dated-output"
@@ -221,6 +319,14 @@ class ServiceWebTest(unittest.TestCase):
     def test_artifacts_survive_refresh_and_preview_can_stream_inline(self):
         job = self._make_succeeded_job()
         output_dir = Path(job["output_dir"])
+        constraint_dir = output_dir / "ground_constraint_global_v1_1"
+        constraint_dir.mkdir()
+        constraint_result = constraint_dir / "contact_global_root_hmr4d_results.pt"
+        constraint_result.write_bytes(b"global-v1.1")
+        (constraint_dir / "metrics.json").write_text(
+            json.dumps({"decision": "diagnostic_pass"}),
+            encoding="utf-8",
+        )
         (output_dir / "1_incam.mp4").write_bytes(b"incam")
         (output_dir / "2_global.mp4").write_bytes(b"global")
         preview_path = output_dir / f"{output_dir.name}_3_incam_global_horiz.mp4"
@@ -229,8 +335,14 @@ class ServiceWebTest(unittest.TestCase):
         job = self.manager.ensure_artifact_bundle(job["job_id"])
         self.assertTrue(Path(job["artifacts"]["artifacts_zip_path"]).is_file())
         self.assertEqual(Path(job["artifacts"]["preview_video_path"]), preview_path)
+        self.assertEqual(Path(job["artifacts"]["global_contact_results_path"]), constraint_result)
         with zipfile.ZipFile(job["artifacts"]["artifacts_zip_path"]) as archive:
             self.assertIn("hmr4d_results.pt", archive.namelist())
+            self.assertIn(
+                "ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt",
+                archive.namelist(),
+            )
+            self.assertIn("ground_constraint_global_v1_1/metrics.json", archive.namelist())
             self.assertIn(preview_path.name, archive.namelist())
 
         response = self.client.get(f"/jobs/{job['job_id']}/artifact/preview_video?inline=true")
@@ -361,6 +473,90 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["job_id"], "gmr_example")
 
+    def test_sonic_button_api_is_advertised_and_dispatches(self):
+        capabilities = self.client.get("/api/capabilities")
+        self.assertEqual(capabilities.status_code, 200)
+        self.assertTrue(capabilities.json()["sonic_bridge_available"])
+
+        payload = {
+            "job_id": "example",
+            "status": "preparing",
+            "frames": 100,
+            "fps": 50.0,
+            "duration_s": 1.98,
+            "reused": False,
+        }
+        with patch.object(self.manager, "send_to_sonic", return_value=payload) as send:
+            response = self.client.post("/jobs/example/to-sonic")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), payload)
+        send.assert_called_once_with("example")
+
+    def test_sonic_conversion_is_cached_and_exposed_as_artifacts(self):
+        job = self._make_succeeded_job("sonic.mp4")
+        output_dir = Path(job["output_dir"])
+        frames = 2
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.zeros((frames, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((frames, 63), dtype=torch.float32),
+                }
+            },
+            output_dir / "hmr4d_results.pt",
+        )
+        controller = CompletingSonicController()
+        with patch(
+            "hmr4d.utils.sonic.SonicPlaybackController",
+            return_value=controller,
+        ):
+            first = self.manager.send_to_sonic(job["job_id"])
+            second = self.manager.send_to_sonic(job["job_id"])
+
+        self.assertFalse(first["reused"])
+        self.assertTrue(second["reused"])
+        self.assertEqual(controller.run_calls, 2)
+        updated = self.manager.get_job(job["job_id"])
+        self.assertEqual(updated["sonic_status"], "complete")
+        self.assertEqual(updated["sonic_frame"], first["frames"])
+        reference = output_dir / "sonic_reference.npz"
+        metadata = output_dir / "sonic_conversion.json"
+        self.assertEqual(Path(updated["artifacts"]["sonic_reference_path"]), reference)
+        self.assertEqual(Path(updated["artifacts"]["sonic_metadata_path"]), metadata)
+        self.assertTrue(reference.is_file())
+        self.assertTrue(metadata.is_file())
+        self.assertEqual(
+            self.client.get(f"/jobs/{job['job_id']}/artifact/sonic_reference").status_code,
+            200,
+        )
+        with zipfile.ZipFile(updated["artifacts"]["artifacts_zip_path"]) as archive:
+            self.assertIn("sonic_reference.npz", archive.namelist())
+            self.assertIn("sonic_conversion.json", archive.namelist())
+
+    def test_sonic_pause_stops_live_stream_and_marks_idle_fallback(self):
+        job = self._make_succeeded_job("pause-sonic.mp4")
+        job["sonic_status"] = "streaming"
+        job["sonic_frame"] = 25
+        job["sonic_frames"] = 100
+        self.store.save_job(job)
+        controller = PausableSonicController()
+        self.manager._sonic_controller = controller
+        self.manager._sonic_job_id = job["job_id"]
+
+        response = self.client.post(f"/jobs/{job['job_id']}/sonic/pause")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "paused")
+        self.assertEqual(response.json()["fallback"], "idle_reference")
+        self.assertEqual(controller.stop_calls, 1)
+        updated = self.manager.get_job(job["job_id"])
+        self.assertEqual(updated["sonic_status"], "paused")
+        self.assertIsNone(updated["sonic_error"])
+        self.assertIsNone(self.manager._sonic_job_id)
+
+        repeated = self.client.post(f"/jobs/{job['job_id']}/sonic/pause")
+        self.assertEqual(repeated.status_code, 400)
+
     def test_capabilities_report_embedded_backend_by_default(self):
         payload = self.client.get("/api/capabilities").json()
         self.assertEqual(payload["runtime"]["inference_backend"], "embedded")
@@ -369,6 +565,29 @@ class ServiceWebTest(unittest.TestCase):
         options = {item["value"]: item for item in payload["ground_constraints"]["options"]}
         self.assertFalse(options["flat_y"]["enabled"])
         self.assertFalse(options["human3r"]["enabled"])
+
+    def test_ground_constraint_capability_requires_global_v1_1_script(self):
+        root = Path(self.temp_dir.name) / "capability-core"
+        script_dir = root / "tools" / "bench" / "human3r_p2y"
+        script_dir.mkdir(parents=True)
+        runtime = {
+            "external_core": {
+                "ready": True,
+                "root": str(root),
+            }
+        }
+        (script_dir / "apply_contact_floor_y.py").write_text("", encoding="utf-8")
+        legacy_only = _ground_constraint_capabilities(runtime)
+        legacy_options = {item["value"]: item for item in legacy_only["options"]}
+        self.assertEqual(legacy_only["default"], "none")
+        self.assertFalse(legacy_options["flat_y"]["enabled"])
+
+        (script_dir / "apply_contact_global_root.py").write_text("", encoding="utf-8")
+        global_v1_1 = _ground_constraint_capabilities(runtime)
+        global_options = {item["value"]: item for item in global_v1_1["options"]}
+        self.assertEqual(global_v1_1["default"], "flat_y")
+        self.assertTrue(global_options["flat_y"]["enabled"])
+        self.assertIn("Global V1.1", global_options["flat_y"]["label"])
 
     def test_external_core_runner_uses_subprocess_protocol(self):
         root = Path(self.temp_dir.name)

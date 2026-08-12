@@ -62,6 +62,10 @@ class SQLiteJobStore:
                     job["preview_status"] = "failed"
                     job["preview_error_summary"] = "Service restarted before preview generation completed."
                     changed = True
+                if job.get("sonic_status") in {"preparing", "streaming"}:
+                    job["sonic_status"] = "error"
+                    job["sonic_error"] = "Service restarted before SONIC streaming completed."
+                    changed = True
                 if changed:
                     job["updated_at"] = utc_now_iso()
                     self._save_job(conn, job)
@@ -141,8 +145,18 @@ class SQLiteJobStore:
             "f_mm": job["f_mm"],
             "save_intermediate": job["save_intermediate"],
             "generate_preview": job["generate_preview"],
+            "ground_constraint": job.get("ground_constraint", "none"),
+            "ground_constraint_status": job.get("ground_constraint_status", "not_requested"),
+            "ground_constraint_error": job.get("ground_constraint_error"),
+            "ground_constraint_fallback_reason": job.get(
+                "ground_constraint_fallback_reason"
+            ),
             "preview_status": job.get("preview_status", "not_requested"),
             "preview_error_summary": job.get("preview_error_summary"),
+            "sonic_status": job.get("sonic_status", "not_requested"),
+            "sonic_error": job.get("sonic_error"),
+            "sonic_frame": job.get("sonic_frame", 0),
+            "sonic_frames": job.get("sonic_frames", 0),
             "output_dir": job["output_dir"],
             "artifacts": job.get("artifacts", {}),
             "error_summary": job.get("error_summary"),

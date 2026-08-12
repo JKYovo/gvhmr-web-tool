@@ -160,23 +160,21 @@ def _prepare_video_copy(source_video_path, target_video_path):
     if source_video_path == target_video_path and target_video_path.exists():
         return source_meta
 
-    should_copy = True
-    if target_video_path.exists():
-        try:
-            target_meta = _video_metadata(target_video_path, display_oriented=False)
-            should_copy = (
-                source_meta["num_frames"] != target_meta["num_frames"]
-                or source_meta["width"] != target_meta["width"]
-                or source_meta["height"] != target_meta["height"]
-            )
-        except Exception:
-            should_copy = True
-
-    if should_copy:
-        Log.info(f"[Copy Video] {source_video_path} -> {target_video_path}")
-        transcode_video_normalized(source_video_path, target_video_path, fps=PROCESSED_FPS, crf=CRF)
-    else:
-        Log.info(f"[Copy Video] Reusing {target_video_path}")
+    # Always let the timestamp-aware normalizer validate an existing target.
+    # Frame count and resolution alone cannot detect the old failure mode where
+    # every 60 FPS frame was merely relabeled as 30 FPS, doubling the duration.
+    metadata = transcode_video_normalized(
+        source_video_path,
+        target_video_path,
+        fps=PROCESSED_FPS,
+        crf=CRF,
+    )
+    action = "Reusing" if metadata["reused"] else "Normalized"
+    Log.info(
+        f"[Copy Video] {action} {target_video_path}: "
+        f"{metadata['source_fps']:.3f} FPS/{metadata['source_duration']:.3f}s -> "
+        f"{metadata['output_fps']:.3f} FPS/{metadata['output_duration']:.3f}s"
+    )
 
     return source_meta
 

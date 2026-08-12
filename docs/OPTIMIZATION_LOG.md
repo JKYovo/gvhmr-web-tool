@@ -1369,6 +1369,262 @@ ydd 和 qhy 使用完全相同参数继续回归：
 
 ---
 
+## P15：Web 输入视频强制按时间戳重采样为 30 FPS
+
+### 基本信息
+
+- 日期：2026-08-11
+- 分支：`gvhmr-web-tool/main`
+- 状态：`CPU 已验证`
+- 上游依据或实验基线：P14 Metric VDA 测试发现 ydd/qhy 旧任务的 `0_input_video.mp4` 被慢放一倍
+- 范围：Web embedded/external-core 视频准备路径、旧错误输入识别和 60→30 FPS 回归
+- 不包含：重新生成历史 GVHMR tensor、修改模型算法、GPU 完整推理
+
+### 优化目标
+
+保证模型使用的 `0_input_video.mp4` 是按源视频时间戳真正重采样得到的恒定 30 FPS 视频，而不是保留全部源帧后只将容器帧率改成 30。源视频为 60 FPS 时应丢弃约一半帧，同时保持播放时长和动作速度不变。
+
+### 关键实现
+
+- Web embedded runner 不再仅凭分辨率和帧数判断是否复用 `0_input_video.mp4`，统一交给 `normalize_video_fps` 校验目标帧率和源/目标时长。
+- 若目标文件是旧版错误产物（30 FPS 标记、帧数未减少、时长翻倍），会自动重新编码。
+- external worker 的兼容视频复制函数也改为同一时间戳重采样入口，避免未来重新启用时恢复旧行为。
+- FFmpeg 使用 `fps=30` filter 和 H.264 CFR 输出；不会通过单纯修改 metadata 改变播放速度。
+
+### 接口、配置与资产变化
+
+- Web 页面和 API 参数不变；所有新任务自动使用 30 FPS 模型输入。
+- 上传原件 `submitted_input.*` 继续保留原始帧率，供审计和重新处理；真正送入 GVHMR 的文件仍为 `0_input_video.mp4`。
+- 无新增依赖或模型资产。
+
+### 验证方法与结果
+
+在 `gvhmr` Conda 环境运行：
+
+```bash
+PYTHONPATH=/home/user-kevien/gvhmr_pkg/gvhmr-web-tool \
+  /home/user-kevien/miniforge3/bin/conda run -n gvhmr \
+  python tools/bench/test_p6_optimizations.py
+```
+
+合成回归先构造 60 FPS、60 帧、1.000 秒源视频，再构造旧错误形式的 30 FPS、60 帧、2.000 秒 `0_input_video.mp4`。Web 输入准备完成后结果为 30 FPS、30 帧、1.000 秒；测试输出 `P6 optimization checks passed`。
+
+### 未完成项和已知风险
+
+- 已经由旧输入生成的历史 `hmr4d_results.pt` 不会因本修复自动重算；这类任务必须从原始 `submitted_input.*` 新建任务，不能只重新生成预览。
+- 变帧率视频会按显示时间戳采样为恒定 30 FPS，个别输出帧可能复制或丢弃，这是保持真实时间轴的预期行为。
+- 本项没有重新占用 GPU 跑完整视频，因为修复位于模型前的 CPU/FFmpeg 输入阶段。
+
+### 回退方式
+
+回退本项三个代码文件即可恢复旧逻辑；不建议回退，因为旧逻辑会在 60 FPS 输入上造成动作慢放。
+
+### 主要涉及文件
+
+- `hmr4d/api/video_to_data.py`
+- `hmr4d/service/external_core_worker.py`
+- `tools/bench/test_p6_optimizations.py`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P16：Web 自动平地切换至 Contact Global V1.1
+
+### 基本信息
+
+- 日期：2026-08-11
+- 分支：`feature/gvhmr-opt`
+- 状态：`CPU 已验证`
+- 上游依据或实验基线：core-opt P16.1 Contact-aware Global Optimizer V1.1；cxk/ydd/qhy 三视频离线对比
+- 范围：Web source-mode 后处理路由、能力检测、任务产物、下载与失败回退
+- 不包含：Human3R 启用、重新运行完整视频 GPU 人体推理、旧历史任务批量重算
+
+### 优化目标
+
+用 marker-aware Contact Global V1.1 完全替代新任务中的 local-Y 0.5 秒后处理。自动平地必须从原始 FootMR tensor 单次求解整段 root XYZ；V1.1 失败或保护条件拒绝时直接恢复 raw，不能再串联或回退到旧 local-Y。
+
+### 关键实现
+
+- Web 仓库内置 `apply_contact_global_root.py`，采用 toe/heel 独立 XZ anchor、FootMR 四路连续接触权重、segment fade 以及按真实 `dt` 归一化的一阶/二阶时间项。
+- external worker 的 `flat_y` 路由改为调用 Global V1.1。`flat_y` 仅作为现有页面和 API 的兼容值保留，不再表示旧 root-Y 算法。
+- 新任务只创建 `ground_constraint_global_v1_1/`，从 `hmr4d_results_raw.pt` 生成候选。只有 `metrics.json` 的 `decision=diagnostic_pass` 时才覆盖当前 `hmr4d_results.pt`。
+- 脚本异常、metrics 缺失或 guardrail 失败时直接把 `hmr4d_results_raw.pt` 恢复为主结果。测试中即使 core 同时存在旧 `apply_contact_floor_y.py`，也不会调用它。
+- manager、下载接口和 ZIP 增加 Global V1.1 tensor 与 metrics。旧 `ground_constraint_flat_y` 产物只用于历史任务只读发现和归档兼容，不进入任何新任务计算链路。
+- capabilities 只有检测到 `apply_contact_global_root.py` 才启用并默认选择“自动平地约束（Global V1.1）”；Human3R 仍显示但不可选。
+- V1.1 只修改 `smpl_params_global.transl`；body pose、global orient、betas、incam、相机和 `net_outputs` 保持不变。
+
+### 接口、配置与资产变化
+
+新任务产物：
+
+```text
+hmr4d_results_raw.pt
+ground_constraint_global_v1_1/
+├── contact_global_root_hmr4d_results.pt
+├── metrics.json
+└── contact_global_root_curves.png
+hmr4d_results.pt
+```
+
+任务 artifact 新增 `global_contact_results_path`。页面下载项新增“Global V1.1 结果 PT”。没有新增模型权重或 Python 依赖，继续使用 `gvhmr` Conda 环境。
+
+### 验证方法与结果
+
+```bash
+PYTHONPATH=/home/user-kevien/gvhmr_pkg/gvhmr-web-tool \
+  /home/user-kevien/miniforge3/bin/conda run -n gvhmr \
+  python -m unittest tools.bench.human3r_p2y.test_apply_contact_global_root
+
+PYTHONPATH=/home/user-kevien/gvhmr_pkg/gvhmr-web-tool \
+  /home/user-kevien/miniforge3/bin/conda run -n gvhmr \
+  python -m unittest discover -s tests -p 'test_service_web.py' -v
+
+PYTHONPATH=/home/user-kevien/gvhmr_pkg/gvhmr-web-tool \
+  /home/user-kevien/miniforge3/bin/conda run -n gvhmr \
+  python tools/bench/test_p6_optimizations.py
+```
+
+- V1.1 算法单测 `5/5` 通过，覆盖 toe/heel 路由、连续权重、contact 精炼、全局 solve 和 24/30/60 FPS 一致性。
+- Web 服务测试 `20/20` 通过，覆盖新路由成功、失败恢复 raw、旧脚本不调用、capabilities、新 artifact 和 ZIP。
+- P6 输入重采样回归通过：60 FPS、1 秒合成输入输出为 30 FPS、30 帧、1 秒。
+- `py_compile`、`node --check hmr4d/service/static_app/app.js` 和 `git diff --check` 通过。
+- 使用现有 cxk 367 帧 raw tensor 在临时目录调用真实 Web worker：`decision=diagnostic_pass`，主结果逐字节等于新候选，raw 保留，旧目录未创建。
+- 该结果和先前 core-opt V1.1 实验 tensor 的 root translation 最大绝对差为 `4.768e-7 m`、P95 为 `1.192e-7 m`，在 `atol=1e-6` 下完全一致；文件 SHA 不同来自 SciPy LSQR 停止迭代的浮点微差，不能用 SHA 作为跨次求解一致性条件。
+- 源码 Web 已重启于 `http://127.0.0.1:7860/`，core 为当前 `gvhmr-web-tool`，健康检查显示 `inference_ready=true`，capabilities 默认启用 Global V1.1。
+
+### Web 布局修正
+
+首次接入时，自动平地卡片的 V1.1 长说明由一行变成两行，触发桌面布局原有的 `.process-panel { overflow: auto; }`，导致“视频处理”卡片出现块内纵向滚动。现已将说明缩短为“默认；整段 root XYZ 接触优化”，并把该卡片设为 `overflow: visible`。桌面首行保证至少 390 px、整个内容区至少 740 px；窗口不足时由页面整体滚动，不裁切表单或在视频处理块内滚动。这只恢复界面布局，不改变 `flat_y` 到 Global V1.1 的后端路由、参数或产物。
+
+### 未完成项和已知风险
+
+- 本次没有提交新视频重新运行 FootMR GPU 推理；Web 接入使用已有 cxk raw tensor验证 CPU 后处理及发布逻辑。完整人体模型 GPU 路径未因本项改变。
+- 单一固定平地与 FootMR contact 仍是前提。多层箱顶、台阶或错误接触不能由 V1.1 自动识别，guardrail 也不等于场景真值验证。
+- 历史任务不会自动重算；其旧 local-Y 文件仍可读取，但新提交或重试后的运行链路只使用 V1.1。
+
+### 回退方式
+
+页面可选“不启用”，直接发布原始 FootMR。算法异常或保护失败也会自动恢复 `hmr4d_results_raw.pt`；不再提供回退到旧 local-Y 的运行分支。
+
+### 主要涉及文件
+
+- `tools/bench/human3r_p2y/apply_contact_global_root.py`
+- `tools/bench/human3r_p2y/test_apply_contact_global_root.py`
+- `hmr4d/service/external_core_worker.py`
+- `hmr4d/service/manager.py`
+- `hmr4d/service/server.py`
+- `hmr4d/service/static_app/app.js`
+- `hmr4d/service/static_app/index.html`
+- `tests/test_service_web.py`
+- `README.md`
+- `README.en.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P17：WebTool 内置 SONIC 适配层，移除 Kimodo 运行时依赖
+
+### 基本信息
+
+- 日期：2026-08-12
+- 仓库：`/home/user-kevien/gvhmr_pkg/gvhmr-web-tool`
+- 分支：`main`
+- 状态：CPU 已验证，五条真实 Web 任务 bit-exact
+- 上游依据：此前实验使用的 `kimodo.integrations.sonic`
+- 范围：最终 Web `hmr4d_results.pt` 转 SONIC reference、50 FPS SO(3) 重采样、SONIC v4 ZMQ 协议、本地播放和 Web 显式发送按钮
+- 不包含：任务完成后自动推流、修改 SONIC/MuJoCo、真机运行、控制策略优化
+
+### 优化目标
+
+把已经合入正式 GVHMR WebTool 的人体结果直接转换并发送给 SONIC，不再启动废弃的 `gvhmr-core-opt` 或 Kimodo 环境，同时保证 SONIC 收到的 reference 与之前实际验证过的 Kimodo 链路完全一致。
+
+### 关键实现
+
+- 新增 `hmr4d/utils/sonic.py`，保留原 Apache-2.0/NVIDIA 版权声明和旧实现的坐标变换、SMPL-X FK、30→50 FPS Slerp、腕部计算、10 帧 look-ahead、v4 binary message 与播放生命周期。
+- 不复制 Kimodo 的 137 MB `SMPLX_NEUTRAL.npz`，只嵌入旧实现实际读取的 `55×3 float32 J` 与 55 个 parent，约 1.8 KB。保持 float32 是 bit-exact 的必要条件；使用原始 float64 会令 `term1_local` 出现最大一个 float32 ULP 的差异。
+- 新增通用 CLI：`tools/sonic/convert_gvhmr.py` 接受任意 Web 任务最终发布的 `hmr4d_results.pt`；`tools/sonic/play_reference.py` 接受任意 reference 文件，不再绑定实验动作名。
+- 转换只读取 Web 结果并写入显式指定的目标路径，不覆盖任务 tensor、不修改 job.json、不自动连接 SONIC。
+- `requirements.txt` 明确加入 SciPy 与 PyZMQ；运行统一使用 `gvhmr` Conda 环境。
+
+### 验证方法与结果
+
+在 WebTool 本仓库用当前 jntm/lly/cxk/qhy/ydd 正式任务的 `hmr4d_results.pt` 重新生成 SONIC reference，并与之前实际播放使用的 Kimodo reference 比较：
+
+| 动作 | Web 帧数 | SONIC 帧数 | term1_local | root_quat | wrist | fps |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| jntm | 540 | 899 | bit-exact | bit-exact | bit-exact | bit-exact |
+| lly | 469 | 781 | bit-exact | bit-exact | bit-exact | bit-exact |
+| cxk | 367 | 611 | bit-exact | bit-exact | bit-exact | bit-exact |
+| qhy | 1507 | 2511 | bit-exact | bit-exact | bit-exact | bit-exact |
+| ydd | 1979 | 3298 | bit-exact | bit-exact | bit-exact | bit-exact |
+
+四组数组在五条动作上的最大绝对差均为 `0`。此外，输入校验、转换 shape、look-ahead/protocol header、假 socket 播放和暂停后不再发包 4 项测试通过；Web 服务测试 `23/23` 通过，其中覆盖按钮 API、首次转换、源 SHA 缓存复用、状态回调、暂停与重复暂停保护、独立下载和 ZIP 收录。30 FPS 输入重采样回归、`py_compile`、`node --check` 与 `git diff --check` 均通过，测试未连接真实 SONIC。当前运行环境为 NumPy 2.2.6；另在隔离临时环境用 requirements 声明的 NumPy 1.23.5 + SciPy 1.15.3 复算 cxk，NPZ SHA256 与四组数组仍完全一致，排除当前机器依赖漂移造成的偶然通过。
+
+正式源码 Web 已通过 `start_web_source.sh` 重启于 `http://127.0.0.1:7860/`，capabilities 显示 `sonic_bridge_available=true`、`inference_ready=true`，core 仍为当前 `gvhmr-web-tool`，自动地面约束仍为 Global V1.1。机器原有 PyZMQ 只位于用户 site-packages，而服务使用 `PYTHONNOUSERSITE=1`，因此另将 `pyzmq 27.1.0` 安装进 `gvhmr` 环境并验证隔离导入成功。
+
+隔离验证结果位于：
+
+```text
+/home/user-kevien/gvhmr_pkg/experiments/sonic_webtool_migration_20260812/
+├── bit_exact_report.json
+└── new/{jntm,lly,cxk,qhy,ydd}/
+    ├── sonic_reference.npz
+    └── conversion.json
+```
+
+### 使用方式
+
+成功任务的详情操作栏会显示“发送到 SONIC”。点击后 Web 从最终发布的 `hmr4d_results.pt` 生成或复用 `sonic_reference.npz`，并由后台线程推流；HTTP 请求不会等待整个动作播放完成。同一 Web 服务只维护一个 publisher，再次发送会停止并替换当前动作。页面复用原 `.detail-actions` 操作栏，没有增加面板、页面高度或块内滚动。
+
+推流处于 `preparing/streaming` 时显示“暂停 SONIC”。暂停会停止 publisher 并停止重复最后一帧；当前 SONIC policy 在 live reference 超过 `0.5s` 未更新后丢弃它，再用 `0.4s` 平滑切换到自身 `stream_reference.npz` 的 idle reference。这里没有发送全零 SMPL/T-pose，也没有直接调用机器人 reset，因此“默认姿态”严格指 SONIC policy 的内置 idle/default reference。暂停后任务记录为 `paused`，仍可再次发送。
+
+### 自动平地回退原因展示
+
+Global V1.1 的 `metrics.json` 新增 `failed_guardrails` 和 `guardrail_details`，不仅记录布尔结果，也记录水平/垂直修正、root 步长、root 加速度的实际值与阈值，以及脚滑、接触段漂移、支撑高度、悬空和穿地的优化前后数值。Web worker 将失败项转换为中文 `ground_constraint_fallback_reason`；任务详情的“错误”和操作提示会直接显示该原因，任务 JSON 同时保留结构化字段。异常、指标缺失或损坏仍显示对应运行原因；历史 metrics 没有数值明细时至少显示失败的 guardrail 名称。没有新增卡片或滚动区域。
+
+任务会记录 `preparing / streaming / complete / stopped / error` 状态和帧进度，生成的 reference 与转换 metadata 可单独下载，也会重建进任务 ZIP。推流进度约每 0.5 秒写入一次 SQLite，终态一定保存；服务重启会把未完成的推流标记为 error。
+
+CLI 仍可独立使用：
+
+```bash
+conda run -n gvhmr python tools/sonic/convert_gvhmr.py \
+  runtime/jobs/<任务>/hmr4d_results.pt \
+  runtime/jobs/<任务>/sonic_reference.npz \
+  --metadata runtime/jobs/<任务>/sonic_conversion.json
+
+conda run -n gvhmr python tools/sonic/play_reference.py \
+  runtime/jobs/<任务>/sonic_reference.npz
+```
+
+### 未完成项和已知风险
+
+- 当前 SONIC v4 使用 ZMQ PUB，没有 ACK。`complete` 只表示 Web publisher 已发送完整段，不能证明 SONIC subscriber 实际收到；用户仍须先启动 SONIC/MuJoCo。
+- bit-exact 证明输入 SONIC 的 reference 和协议不变，不证明 SONIC 对 ELF3 的跟踪质量。此前踝关节目标越限问题仍存在，不得直接用于真机。
+- 暂停依赖当前 SONIC 配置 `require_live_reference=false`、`live_reference_timeout_s=0.5` 和 `source_blend_seconds=0.4`；如果未来 SONIC 改为强制 live reference，停止推流将不再等价于回默认姿态，需同步调整协议。
+
+### 回退方式
+
+删除本地适配模块和 `tools/sonic` 即可回退；Web 推理、地面约束、任务结果和页面均未依赖该入口，也没有旧结果被覆盖。
+
+### 主要涉及文件
+
+- `hmr4d/utils/sonic.py`
+- `hmr4d/service/manager.py`
+- `hmr4d/service/server.py`
+- `hmr4d/service/store.py`
+- `hmr4d/service/static_app/index.html`
+- `hmr4d/service/static_app/app.js`
+- `tools/sonic/convert_gvhmr.py`
+- `tools/sonic/play_reference.py`
+- `tools/sonic/test_sonic.py`
+- `requirements.txt`
+- `tests/test_service_web.py`
+- `README.md`
+- `README.en.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
 ## 后续优化记录模板
 
 复制以下小节并追加到本文档，不能覆盖历史记录。
