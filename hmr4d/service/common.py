@@ -119,10 +119,16 @@ def write_json(path, payload):
 def zip_artifacts(output_path, files):
     output_path = Path(output_path)
     ensure_dir(output_path.parent)
-    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    stored_extensions = {".mp4", ".webm", ".mov", ".avi", ".mkv", ".npz", ".pt", ".zip"}
+    with zipfile.ZipFile(output_path, "w") as archive:
         for file_path, arcname in files:
             if file_path and Path(file_path).exists():
-                archive.write(file_path, arcname=arcname)
+                compression = (
+                    zipfile.ZIP_STORED
+                    if Path(file_path).suffix.lower() in stored_extensions
+                    else zipfile.ZIP_DEFLATED
+                )
+                archive.write(file_path, arcname=arcname, compress_type=compression)
     return output_path
 
 

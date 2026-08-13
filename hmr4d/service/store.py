@@ -151,12 +151,14 @@ class SQLiteJobStore:
             "ground_constraint_fallback_reason": job.get(
                 "ground_constraint_fallback_reason"
             ),
+            "ground_constraint_warning": job.get("ground_constraint_warning"),
             "preview_status": job.get("preview_status", "not_requested"),
             "preview_error_summary": job.get("preview_error_summary"),
             "sonic_status": job.get("sonic_status", "not_requested"),
             "sonic_error": job.get("sonic_error"),
             "sonic_frame": job.get("sonic_frame", 0),
             "sonic_frames": job.get("sonic_frames", 0),
+            "sonic_speed": job.get("sonic_speed", 1.0),
             "output_dir": job["output_dir"],
             "artifacts": job.get("artifacts", {}),
             "error_summary": job.get("error_summary"),

@@ -16,6 +16,30 @@ from hmr4d.model.gvhmr.utils.endecoder import EnDecoder
 from hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
 
 
+def _static_camera_root_corrections(pred_w_root, pred_c_root, threshold):
+    """Return the cumulative correction used by the original suffix loop.
+
+    The recurrence is sequential because the threshold is evaluated after all
+    previous corrections, but it only needs to update the current root. This
+    avoids repeatedly rewriting every future joint and translation.
+    """
+    B, length = pred_w_root.shape[:2]
+    cumulative = torch.zeros((B, 3), device=pred_w_root.device, dtype=pred_w_root.dtype)
+    corrections = torch.zeros_like(pred_w_root)
+    for index in range(1, length):
+        difference = pred_w_root[:, index] - cumulative - pred_c_root[:, index]
+        outside = ~((difference > -threshold) * (difference < threshold))
+        step = torch.clamp(difference * outside, -0.02, 0.02)
+        cumulative = cumulative + step
+        corrections[:, index] = cumulative
+    return corrections
+
+
+def _cumulative_displacement(displacement):
+    zero = torch.zeros_like(displacement[:, :1])
+    return torch.cat((zero, torch.cumsum(displacement, dim=1)), dim=1)
+
+
 @autocast(enabled=False)
 def pp_static_joint(outputs, endecoder: EnDecoder):
     # Global FK
@@ -87,12 +111,11 @@ def pp_static_joint_cam(outputs, endecoder: EnDecoder):
     post_w_transl = pred_smpl_params_global["transl"].clone()  # (B, L, 3)
     post_w_j3d = pred_w_j3d.clone()  # (B, L, J, 3)
     cp_thr = torch.tensor([0.25, 0.25, 0.25]).to(post_w_j3d)  # Only update very bad pred
-    for i in range(1, L):
-        cp_diff = post_w_j3d[:, i, 0] - pred_c_j3d_in_w[:, i, 0]  # (B, 3)
-        cp_diff = cp_diff * ~((cp_diff > -cp_thr) * (cp_diff < cp_thr))
-        cp_diff = torch.clamp(cp_diff, -0.02, 0.02)
-        post_w_transl[:, i:] -= cp_diff
-        post_w_j3d[:, i:] -= (cp_diff)[:, None, None]
+    camera_correction = _static_camera_root_corrections(
+        post_w_j3d[:, :, 0], pred_c_j3d_in_w[:, :, 0], cp_thr
+    )
+    post_w_transl -= camera_correction
+    post_w_j3d -= camera_correction.unsqueeze(-2)
 
     # 1. Make stationary joint stay stationary
     # pred_j3d_static = pred_w_j3d.clone()[:, :, joint_ids]  # (B, L, J, 3)
@@ -106,10 +129,10 @@ def pp_static_joint_cam(outputs, endecoder: EnDecoder):
     pred_disp = pred_disp_sumJ / static_label_sumJ  # (B, L-1, 3)
     pred_disp[:, :, 1] = 0  # do not modify y
 
-    # Overwrite results (for-loop)
-    for i in range(1, L):
-        post_w_transl[:, i:] -= pred_disp[:, [i - 1]]
-        post_w_j3d[:, i:] -= pred_disp[:, [i - 1], None]
+    # The old suffix update is exactly the cumulative displacement over time.
+    static_correction = _cumulative_displacement(pred_disp)
+    post_w_transl -= static_correction
+    post_w_j3d -= static_correction.unsqueeze(-2)
 
     # Put the sequence on the ground by -min(y), this does not consider foot height, for o3d vis
     ground_y = post_w_j3d[..., 1].flatten(-2).min(dim=-1)[0]  # (B,)  Minimum y value

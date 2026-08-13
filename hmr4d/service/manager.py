@@ -86,6 +86,8 @@ def _progress_from_log(message, task_kind):
         return 90, "视频预处理完成", False
     if "[hmr4d] predicting" in lower:
         return 93, "恢复人体动作", False
+    if "[long video] window" in lower:
+        return 96, "分窗恢复长视频动作", False
     if "loading gvhmr model" in lower or "loading ckpt" in lower:
         return 95, "加载动作模型", False
     if "[hmr4d] elapsed" in lower:
@@ -224,6 +226,7 @@ class JobManager:
             "ground_constraint_status": "pending" if ground_constraint != "none" else "not_requested",
             "ground_constraint_error": None,
             "ground_constraint_fallback_reason": None,
+            "ground_constraint_warning": None,
             "preview_status": "not_requested",
             "preview_error_summary": None,
             "progress_percent": 0,
@@ -367,6 +370,7 @@ class JobManager:
         )
         job["ground_constraint_error"] = None
         job["ground_constraint_fallback_reason"] = None
+        job["ground_constraint_warning"] = None
         job["cancel_requested"] = False
         job["preview_status"] = "not_requested"
         job["preview_error_summary"] = None
@@ -413,8 +417,15 @@ class JobManager:
             self.store.update_batch_counts(job["batch_id"])
         return job
 
-    def send_to_sonic(self, job_id):
+    def send_to_sonic(self, job_id, *, speed=1.0):
         """Prepare and asynchronously stream a completed job to local SONIC."""
+        speed = float(speed)
+        supported_speeds = (0.5, 0.75, 1.0)
+        if speed not in supported_speeds:
+            raise ValueError(
+                f"Unsupported SONIC speed {speed:g}; choose one of "
+                + ", ".join(f"{value:g}x" for value in supported_speeds)
+            )
         job = self.get_job(job_id)
         if job is None:
             return None
@@ -432,20 +443,34 @@ class JobManager:
         source = output_dir / "hmr4d_results.pt"
         if not source.is_file():
             raise FileNotFoundError(f"Missing inference result at {source}")
-        reference_path = output_dir / "sonic_reference.npz"
-        metadata_path = output_dir / "sonic_conversion.json"
+        speed_tag = str(speed).replace(".", "_")
+        if speed == 1.0:
+            reference_path = output_dir / "sonic_reference.npz"
+            metadata_path = output_dir / "sonic_conversion.json"
+        else:
+            reference_path = output_dir / f"sonic_reference_speed_{speed_tag}.npz"
+            metadata_path = output_dir / f"sonic_conversion_speed_{speed_tag}.json"
+        effective_source_fps = 30.0 * speed
         source_digest = sha256(source)
         metadata = None
         if reference_path.is_file() and metadata_path.is_file():
             try:
                 cached = json.loads(metadata_path.read_text(encoding="utf-8"))
-                if cached.get("source_sha256") == source_digest:
+                if (
+                    cached.get("source_sha256") == source_digest
+                    and float(cached.get("source_fps", 0.0)) == effective_source_fps
+                ):
                     metadata = cached
             except (OSError, ValueError, TypeError):
                 metadata = None
         reused = metadata is not None
         if metadata is None:
-            metadata = convert(source, reference_path, source_fps=30.0)
+            metadata = convert(
+                source,
+                reference_path,
+                source_fps=effective_source_fps,
+            )
+            metadata["playback_speed"] = speed
             metadata_path.write_text(
                 json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
@@ -465,6 +490,7 @@ class JobManager:
         job["sonic_error"] = None
         job["sonic_frame"] = 0
         job["sonic_frames"] = reference.frame_count
+        job["sonic_speed"] = speed
         job["sonic_updated_at"] = utc_now_iso()
         job.setdefault("artifacts", {}).update(
             {
@@ -475,6 +501,7 @@ class JobManager:
         self._append_log(
             job,
             f"[SONIC] Prepared {reference.frame_count} frames at {reference.fps:g} FPS"
+            f" / {speed:g}x playback"
             f" ({'cache reused' if reused else 'new reference'}).",
         )
         self._finalize_job(job)
@@ -527,6 +554,7 @@ class JobManager:
             "reference_path": str(reference_path),
             "frames": reference.frame_count,
             "fps": reference.fps,
+            "speed": speed,
             "duration_s": (reference.frame_count - 1) / reference.fps,
             "reused": reused,
         }
@@ -680,6 +708,8 @@ class JobManager:
             "global_contact_results_path": str(constraint_result),
             "flat_ground_y_results_path": str(legacy_constraint_result),
             "ground_constraint_metrics_path": str(constraint_metrics),
+            "long_video_manifest_path": str(output_dir / "long_video" / "manifest.json"),
+            "long_video_metrics_path": str(output_dir / "long_video" / "metrics.json"),
             "sonic_reference_path": str(output_dir / "sonic_reference.npz"),
             "sonic_metadata_path": str(output_dir / "sonic_conversion.json"),
             "incam_video_path": str(output_dir / "1_incam.mp4"),
@@ -687,9 +717,9 @@ class JobManager:
             "preview_video_path": str(output_dir / f"{output_dir.name}_3_incam_global_horiz.mp4"),
             "artifacts_zip_path": str(output_dir / "artifacts.zip"),
         }
-        existing.update(
-            {key: value for key, value in artifact_map.items() if Path(value).is_file()}
-        )
+        for key, value in artifact_map.items():
+            if key not in existing and Path(value).is_file():
+                existing[key] = value
         job["artifacts"] = existing
         return job["artifacts"]
 
@@ -709,6 +739,8 @@ class JobManager:
                 output_dir / "ground_constraint_global_v1_1" / "metrics.json",
                 "ground_constraint_global_v1_1/metrics.json",
             ),
+            (output_dir / "long_video" / "manifest.json", "long_video/manifest.json"),
+            (output_dir / "long_video" / "metrics.json", "long_video/metrics.json"),
             (
                 output_dir / "ground_constraint_flat_y" / "contact_floor_y_hmr4d_results.pt",
                 "ground_constraint_flat_y/contact_floor_y_hmr4d_results.pt",
@@ -723,8 +755,14 @@ class JobManager:
             ),
             (output_dir / "1_incam.mp4", "1_incam.mp4"),
             (output_dir / "2_global.mp4", "2_global.mp4"),
-            (output_dir / "sonic_reference.npz", "sonic_reference.npz"),
-            (output_dir / "sonic_conversion.json", "sonic_conversion.json"),
+            (
+                Path(job.get("artifacts", {}).get("sonic_reference_path", output_dir / "sonic_reference.npz")),
+                Path(job.get("artifacts", {}).get("sonic_reference_path", "sonic_reference.npz")).name,
+            ),
+            (
+                Path(job.get("artifacts", {}).get("sonic_metadata_path", output_dir / "sonic_conversion.json")),
+                Path(job.get("artifacts", {}).get("sonic_metadata_path", "sonic_conversion.json")).name,
+            ),
             (
                 output_dir / f"{output_dir.name}_3_incam_global_horiz.mp4",
                 f"{output_dir.name}_3_incam_global_horiz.mp4",
@@ -798,6 +836,10 @@ class JobManager:
                         job["ground_constraint_fallback_reason"] = result[
                             "ground_constraint_fallback_reason"
                         ]
+                    if "ground_constraint_warning" in result:
+                        job["ground_constraint_warning"] = result[
+                            "ground_constraint_warning"
+                        ]
                     if job.get("cancel_requested"):
                         job["status"] = "cancelled"
                         job["finished_at"] = utc_now_iso()
@@ -859,6 +901,11 @@ class JobManager:
                     job["finished_at"] = utc_now_iso()
                     job["error_summary"] = error_summary
                     job["progress_stage"] = "动作处理失败"
+                    if job.get("ground_constraint") != "none":
+                        job["ground_constraint_status"] = "failed"
+                        job["ground_constraint_error"] = error_summary
+                        job["ground_constraint_fallback_reason"] = None
+                        job["ground_constraint_warning"] = None
                     self._append_log(job, f"[Worker] Failed: {error_summary}")
 
             job["updated_at"] = utc_now_iso()

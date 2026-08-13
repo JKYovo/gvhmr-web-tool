@@ -11,6 +11,7 @@ const state = {
   refreshing: false,
   submitting: { single: false, batch: false },
   activeAction: null,
+  sonicSpeed: 1.0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -560,6 +561,12 @@ function actionHint(job) {
       kind: "warning",
     };
   }
+  if (job.ground_constraint_warning) {
+    return {
+      text: `自动平地结果已采用；诊断提示：${job.ground_constraint_warning}`,
+      kind: "warning",
+    };
+  }
   if (job.preview_status === "running" || job.preview_status === "queued") {
     return { text: "人体动作结果已经可用，预览视频正在后台生成。", kind: "" };
   }
@@ -598,6 +605,7 @@ function renderActions(job) {
   const cancelButton = $("cancelBtn");
   const toGmrButton = $("toGmrBtn");
   const toSonicButton = $("toSonicBtn");
+  const sonicSpeedButton = $("sonicSpeedBtn");
   const pauseSonicButton = $("pauseSonicBtn");
   const isSucceeded = job?.status === "succeeded";
   const previewBusy = ["queued", "running"].includes(job?.preview_status);
@@ -630,6 +638,10 @@ function renderActions(job) {
   toSonicButton.hidden = !canUseSonic;
   toSonicButton.disabled = state.activeAction === "to-sonic";
   toSonicButton.textContent = sonicBusy ? "重新发送到 SONIC" : "发送到 SONIC";
+  sonicSpeedButton.hidden = !canUseSonic;
+  sonicSpeedButton.disabled = state.activeAction === "to-sonic";
+  sonicSpeedButton.textContent = `SONIC 速度 ${state.sonicSpeed.toFixed(2).replace(/0$/, "")}×`;
+  sonicSpeedButton.title = "只调整发送给 SONIC 的动作速度；输出控制频率始终为 50 FPS";
   pauseSonicButton.hidden = !sonicBusy;
   pauseSonicButton.disabled = state.activeAction === "pause-sonic";
   pauseSonicButton.textContent = state.activeAction === "pause-sonic" ? "正在暂停" : "暂停 SONIC";
@@ -781,10 +793,13 @@ async function toSonicSelected() {
   if (!state.selectedJobId) return showToast("请先选择任务。", true);
   await runAction("to-sonic", async () => {
     try {
-      const result = await request(`jobs/${state.selectedJobId}/to-sonic`, { method: "POST" });
+      const result = await request(
+        `jobs/${state.selectedJobId}/to-sonic?speed=${encodeURIComponent(state.sonicSpeed)}`,
+        { method: "POST" },
+      );
       const duration = Number(result.duration_s || 0).toFixed(2);
       showToast(
-        `已开始 SONIC 推流：${result.frames} 帧 / ${duration} 秒` +
+        `已开始 SONIC 推流：${result.speed}× / ${result.frames} 帧 / ${duration} 秒` +
         `${result.reused ? "（复用已转换数据）" : ""}`,
       );
       await refreshJobs();
@@ -793,6 +808,14 @@ async function toSonicSelected() {
       showToast(`SONIC 推流失败：${error.message}`, true);
     }
   });
+}
+
+function cycleSonicSpeed() {
+  const speeds = [1.0, 0.75, 0.5];
+  const current = speeds.indexOf(state.sonicSpeed);
+  state.sonicSpeed = speeds[(current + 1) % speeds.length];
+  renderActions(state.selectedJob);
+  showToast(`SONIC 动作速度已设为 ${state.sonicSpeed}×；控制频率仍为 50 FPS。`);
 }
 
 async function pauseSonicSelected() {
@@ -856,6 +879,7 @@ async function boot() {
   $("retryBtn").addEventListener("click", retrySelected);
   $("cancelBtn").addEventListener("click", cancelSelected);
   $("toGmrBtn").addEventListener("click", toGmrSelected);
+  $("sonicSpeedBtn").addEventListener("click", cycleSonicSpeed);
   $("toSonicBtn").addEventListener("click", toSonicSelected);
   $("pauseSonicBtn").addEventListener("click", pauseSonicSelected);
   $("previewVideo").addEventListener("loadedmetadata", () => {

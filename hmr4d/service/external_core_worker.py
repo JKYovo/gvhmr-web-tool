@@ -1,15 +1,49 @@
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
 RESULT_PREFIX = "__GVHMR_CORE_RESULT__="
 CRF = 23
+LONG_VIDEO_THRESHOLD_FRAMES = 1800
+LONG_VIDEO_WINDOW_FRAMES = 600
+LONG_VIDEO_STRIDE_FRAMES = 480
+
+
+def _positive_env_int(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
+def _checkpoint_identity(path):
+    path = Path(path).expanduser().resolve()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return {"path": str(path), "sha256": digest.hexdigest()}
+
+
+def _effective_checkpoint_path(configured_path, model):
+    configured_path = Path(configured_path).expanduser().resolve()
+    if model.pipeline.use_foot_refiner and configured_path.name == "gvhmr_siga24_release.ckpt":
+        return Path("inputs/footmr_assets/footmr_checkpoint.ckpt").resolve()
+    return configured_path
 
 
 def _ensure_chumpy_numpy_compat():
@@ -161,30 +195,38 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
         except (OSError, ValueError):
             decision = None
 
-    if error is None and decision == "diagnostic_pass" and enhanced_path.is_file():
+    accepted_decisions = {"diagnostic_pass", "guardrail_failed"}
+    if error is None and decision in accepted_decisions and enhanced_path.is_file():
         shutil.copy2(enhanced_path, result_path)
-        print("[Ground Constraint] Contact global V1.1 applied; raw tensor preserved.", flush=True)
-        return {
+        warning = None
+        if decision == "guardrail_failed":
+            warning = _ground_constraint_fallback_reason(metrics, decision)
+            print(
+                "[Ground Constraint] Contact global V1.1 applied despite diagnostic "
+                f"guardrails: {warning}",
+                flush=True,
+            )
+        else:
+            print(
+                "[Ground Constraint] Contact global V1.1 applied; raw tensor preserved.",
+                flush=True,
+            )
+        payload = {
             "ground_constraint": "flat_y",
             "ground_constraint_status": "applied",
             "raw_hmr4d_results_path": str(raw_path.resolve()),
             "global_contact_results_path": str(enhanced_path.resolve()),
             "ground_constraint_metrics_path": str(metrics_path.resolve()),
         }
+        if warning:
+            payload["ground_constraint_warning"] = warning
+        return payload
 
-    shutil.copy2(raw_path, result_path)
     reason = error or _ground_constraint_fallback_reason(metrics, decision)
-    print(f"[Ground Constraint] Contact global V1.1 fallback to raw result: {reason}", flush=True)
-    payload = {
-        "ground_constraint": "flat_y",
-        "ground_constraint_status": "fallback",
-        "ground_constraint_error": reason,
-        "ground_constraint_fallback_reason": reason,
-        "raw_hmr4d_results_path": str(raw_path.resolve()),
-    }
-    if metrics_path.is_file():
-        payload["ground_constraint_metrics_path"] = str(metrics_path.resolve())
-    return payload
+    raise RuntimeError(
+        "Contact global V1.1 did not produce a valid constrained result; "
+        f"raw fallback is disabled: {reason}"
+    )
 
 
 def _ground_constraint_fallback_reason(metrics, decision):
@@ -247,6 +289,7 @@ def _process(args):
     import torch
     from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
     from hmr4d.utils.net_utils import detach_to_cpu
+    from hmr4d.utils.long_video import predict_long_video
     from hmr4d.utils.pylogger import Log
     from tools.demo.demo import load_data_dict, run_preprocess
 
@@ -266,23 +309,176 @@ def _process(args):
     cfg.source_video_path = str(Path(args.video).expanduser().resolve())
 
     result_path = Path(cfg.paths.hmr4d_results)
+    long_video_result = {}
     if not result_path.is_file():
         run_preprocess(cfg)
         data = load_data_dict(cfg)
+        frame_count = int(data["length"])
+        threshold = _positive_env_int(
+            "GVHMR_LONG_VIDEO_THRESHOLD_FRAMES", LONG_VIDEO_THRESHOLD_FRAMES
+        )
+        is_long_video = frame_count >= threshold
+        if is_long_video:
+            # The trained networks already use a 120-frame local mask for any
+            # sequence longer than 120 frames. The local implementation is
+            # mathematically equivalent to the dense masked implementation,
+            # without allocating an L x L attention score tensor.
+            cfg.attention_impl = "local"
+            cfg.network.attention_impl = "local"
         Log.info("[HMR4D] Predicting with external core")
         model: DemoPL = hydra.utils.instantiate(cfg.model, _recursive_=False)
         model.load_pretrained_model(cfg.ckpt_path)
         model = model.eval().cuda()
-        prediction = detach_to_cpu(
-            model.predict(
-                data,
-                static_cam=cfg.static_cam,
-                no_postproc=cfg.no_postproc,
+        effective_checkpoint = _effective_checkpoint_path(cfg.ckpt_path, model)
+        if is_long_video:
+            Log.info(
+                f"[Long Video] Exact full-sequence local attention; {frame_count} frames"
             )
-        )
+            started = time.perf_counter()
+            fallback_reason = None
+            try:
+                prediction = detach_to_cpu(
+                    model.predict(
+                        data,
+                        static_cam=cfg.static_cam,
+                        no_postproc=cfg.no_postproc,
+                    )
+                )
+            except torch.cuda.OutOfMemoryError:
+                # Unusually long sequences can still exceed memory in FK/IK,
+                # which scale linearly even after attention is bounded. Retry
+                # only that case with resumable temporal windows.
+                torch.cuda.empty_cache()
+                Log.warn(
+                    "[Long Video] Full-sequence FK/IK exceeded CUDA memory; "
+                    "falling back to resumable network windows"
+                )
+                fallback_reason = "cuda_out_of_memory_in_full_sequence_fk_or_ik"
+                prediction = None
+            if prediction is not None:
+                elapsed = time.perf_counter() - started
+                public_long_dir = output_dir / "long_video"
+                public_long_dir.mkdir(parents=True, exist_ok=True)
+                checkpoint = _checkpoint_identity(effective_checkpoint)
+                manifest = {
+                    "schema": "long-video-exact-local-v1",
+                    "source": str(Path(cfg.video_path).resolve()),
+                    "frames": frame_count,
+                    "checkpoint": checkpoint,
+                    "attention_impl": "local",
+                    "attention_window_frames": int(model.pipeline.denoiser3d.max_len),
+                    "static_cam": bool(cfg.static_cam),
+                    "no_postproc": bool(cfg.no_postproc),
+                }
+                metrics = {
+                    "mode": "exact-full-sequence-local-attention",
+                    "frames": frame_count,
+                    "network_and_postprocess_elapsed_s": elapsed,
+                    "window_fallback": False,
+                }
+                public_manifest = public_long_dir / "manifest.json"
+                public_metrics = public_long_dir / "metrics.json"
+                public_manifest.write_text(
+                    json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                public_metrics.write_text(
+                    json.dumps(metrics, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                long_video_result = {
+                    "long_video_mode": metrics["mode"],
+                    "long_video_windows": 1,
+                    "long_video_reused_windows": 0,
+                    "long_video_manifest_path": str(public_manifest.resolve()),
+                    "long_video_metrics_path": str(public_metrics.resolve()),
+                }
+
+        if is_long_video and prediction is None:
+            window_frames = _positive_env_int(
+                "GVHMR_LONG_VIDEO_WINDOW_FRAMES", LONG_VIDEO_WINDOW_FRAMES
+            )
+            stride_frames = _positive_env_int(
+                "GVHMR_LONG_VIDEO_STRIDE_FRAMES", LONG_VIDEO_STRIDE_FRAMES
+            )
+            if not 0 < stride_frames < window_frames:
+                raise ValueError(
+                    "GVHMR_LONG_VIDEO_STRIDE_FRAMES must be smaller than "
+                    "GVHMR_LONG_VIDEO_WINDOW_FRAMES"
+                )
+            cache_identity = json.dumps(
+                {
+                    "schema": "shared-preprocess-windowed-network-v1",
+                    "checkpoint": _checkpoint_identity(effective_checkpoint),
+                    "static_cam": bool(cfg.static_cam),
+                    "no_postproc": bool(cfg.no_postproc),
+                    "use_foot_refiner": bool(model.pipeline.use_foot_refiner),
+                    "num_2d_joints": int(cfg.network.num_2d_joints),
+                    "attention_impl": str(cfg.attention_impl),
+                    "attention_chunk_size": int(cfg.attention_chunk_size),
+                },
+                sort_keys=True,
+            )
+            Log.info(f"[Long Video] Network windows {window_frames}/{stride_frames}")
+            prediction, long_metrics = predict_long_video(
+                model=model,
+                data=data,
+                normalized_video=Path(cfg.video_path),
+                work_root=output_dir / ".long_video_work",
+                static_cam=bool(cfg.static_cam),
+                no_postproc=bool(cfg.no_postproc),
+                detach_to_cpu=detach_to_cpu,
+                window_frames=window_frames,
+                stride_frames=stride_frames,
+                cache_identity=cache_identity,
+                log=lambda message: print(message, flush=True),
+            )
+            public_long_dir = output_dir / "long_video"
+            public_long_dir.mkdir(parents=True, exist_ok=True)
+            public_manifest = public_long_dir / "manifest.json"
+            public_metrics = public_long_dir / "metrics.json"
+            shutil.copy2(long_metrics["manifest"], public_manifest)
+            shutil.copy2(long_metrics["metrics"], public_metrics)
+            long_video_result = {
+                "long_video_mode": long_metrics["mode"],
+                "long_video_windows": long_metrics["windows"],
+                "long_video_reused_windows": long_metrics["reused_windows"],
+                "long_video_manifest_path": str(public_manifest.resolve()),
+                "long_video_metrics_path": str(public_metrics.resolve()),
+            }
+            long_metrics["fallback_reason"] = fallback_reason
+            public_metrics.write_text(
+                json.dumps(long_metrics, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        elif not is_long_video:
+            prediction = detach_to_cpu(
+                model.predict(
+                    data,
+                    static_cam=cfg.static_cam,
+                    no_postproc=cfg.no_postproc,
+                )
+            )
         torch.save(prediction, result_path)
     else:
         Log.info(f"[HMR4D] Reusing cached result at {result_path}")
+        public_long_dir = output_dir / "long_video"
+        public_manifest = public_long_dir / "manifest.json"
+        public_metrics = public_long_dir / "metrics.json"
+        if public_manifest.is_file() and public_metrics.is_file():
+            try:
+                cached_metrics = json.loads(public_metrics.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cached_metrics = {}
+            long_video_result = {
+                "long_video_mode": cached_metrics.get("mode", "unknown"),
+                "long_video_windows": int(cached_metrics.get("windows", 1)),
+                "long_video_reused_windows": int(
+                    cached_metrics.get("reused_windows", 0)
+                ),
+                "long_video_manifest_path": str(public_manifest.resolve()),
+                "long_video_metrics_path": str(public_metrics.resolve()),
+            }
 
     ground_result = _apply_ground_constraint(
         Path(args.core_root).expanduser().resolve(),
@@ -299,6 +495,7 @@ def _process(args):
         "output_dir": str(output_dir),
         "input_video_path": str(Path(cfg.video_path).resolve()),
         "hmr4d_results_path": str(result_path.resolve()),
+        **long_video_result,
         **ground_result,
     }
 

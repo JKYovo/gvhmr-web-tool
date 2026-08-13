@@ -527,9 +527,9 @@ def create_gvhmr_app(manager, settings, *, submit_to_gmr=None, manage_lifecycle=
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/jobs/{job_id}/to-sonic")
-    def submit_job_to_sonic(job_id: str):
+    def submit_job_to_sonic(job_id: str, speed: float = 1.0):
         try:
-            result = manager.send_to_sonic(job_id)
+            result = manager.send_to_sonic(job_id, speed=speed)
             if result is None:
                 raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
             return result

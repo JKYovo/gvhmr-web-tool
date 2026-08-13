@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from hmr4d.api.video_to_data import _ensure_chumpy_numpy_compat
 from hmr4d.service.common import ServiceSettings, create_dated_output_dir
+from hmr4d.service.common import zip_artifacts
 from hmr4d.service.external_core import ExternalCoreRunner, RESULT_PREFIX
 from hmr4d.service.external_core_worker import (
     _apply_ground_constraint,
@@ -86,6 +87,23 @@ class PausableSonicController:
 
 
 class ServiceWebTest(unittest.TestCase):
+    def test_artifact_zip_stores_precompressed_binary_without_recompression(self):
+        root = Path(self.temp_dir.name)
+        motion = root / "motion.pt"
+        metadata = root / "metadata.json"
+        motion.write_bytes(bytes(range(256)) * 32)
+        metadata.write_text('{"status":"ok"}\n', encoding="utf-8")
+        output = zip_artifacts(
+            root / "artifacts.zip",
+            [(motion, "motion.pt"), (metadata, "metadata.json")],
+        )
+        with zipfile.ZipFile(output) as archive:
+            self.assertEqual(archive.getinfo("motion.pt").compress_type, zipfile.ZIP_STORED)
+            self.assertEqual(
+                archive.getinfo("metadata.json").compress_type, zipfile.ZIP_DEFLATED
+            )
+            self.assertEqual(archive.read("motion.pt"), motion.read_bytes())
+
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
         root = Path(self.temp_dir.name)
@@ -152,6 +170,7 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["ground_constraint"], "flat_y")
         self.assertEqual(response.json()["ground_constraint_status"], "pending")
+        self.assertIsNone(response.json()["ground_constraint_warning"])
 
         disabled = self.client.post(
             "/api/jobs/upload",
@@ -192,7 +211,7 @@ class ServiceWebTest(unittest.TestCase):
         self.assertIn("global_contact_results_path", result)
         self.assertNotIn("flat_ground_y_results_path", result)
 
-    def test_contact_global_failure_restores_raw_without_calling_legacy_local_y(self):
+    def test_contact_global_failure_fails_without_raw_or_legacy_fallback(self):
         root = Path(self.temp_dir.name) / "fallback-core"
         script_dir = root / "tools" / "bench" / "human3r_p2y"
         script_dir.mkdir(parents=True)
@@ -212,14 +231,14 @@ class ServiceWebTest(unittest.TestCase):
         video = output / "0_input_video.mp4"
         video.write_bytes(b"video")
 
-        result = _apply_ground_constraint(root, output, video, selected, "flat_y")
+        with self.assertRaisesRegex(RuntimeError, "raw fallback is disabled"):
+            _apply_ground_constraint(root, output, video, selected, "flat_y")
 
-        self.assertEqual(result["ground_constraint_status"], "fallback")
-        self.assertEqual(selected.read_bytes(), b"raw")
+        self.assertEqual(selected.read_bytes(), b"legacy-enhanced")
         self.assertFalse((root / "legacy_was_called").exists())
         self.assertFalse((output / "ground_constraint_flat_y").exists())
 
-    def test_contact_global_guardrail_fallback_reports_failed_values(self):
+    def test_contact_global_guardrail_warning_keeps_constrained_result(self):
         root = Path(self.temp_dir.name) / "guardrail-core"
         script = root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py"
         script.parent.mkdir(parents=True)
@@ -251,14 +270,15 @@ class ServiceWebTest(unittest.TestCase):
 
         result = _apply_ground_constraint(root, output, video, selected, "flat_y")
 
-        self.assertEqual(result["ground_constraint_status"], "fallback")
-        reason = result["ground_constraint_fallback_reason"]
+        self.assertEqual(result["ground_constraint_status"], "applied")
+        reason = result["ground_constraint_warning"]
         self.assertIn("水平修正过大", reason)
         self.assertIn("0.42m", reason)
         self.assertIn("0.35m", reason)
         self.assertIn("悬空/穿地指标未同时改善", reason)
-        self.assertEqual(result["ground_constraint_error"], reason)
-        self.assertEqual(selected.read_bytes(), b"raw")
+        self.assertNotIn("ground_constraint_error", result)
+        self.assertNotIn("ground_constraint_fallback_reason", result)
+        self.assertEqual(selected.read_bytes(), b"candidate")
 
     def test_output_directory_uses_timestamp_and_avoids_collisions(self):
         root = Path(self.temp_dir.name) / "dated-output"
@@ -490,12 +510,21 @@ class ServiceWebTest(unittest.TestCase):
             response = self.client.post("/jobs/example/to-sonic")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json(), payload)
-        send.assert_called_once_with("example")
+        send.assert_called_once_with("example", speed=1.0)
+
+        with patch.object(self.manager, "send_to_sonic", return_value=payload) as send:
+            response = self.client.post("/jobs/example/to-sonic?speed=0.75")
+        self.assertEqual(response.status_code, 200, response.text)
+        send.assert_called_once_with("example", speed=0.75)
+
+        invalid = self.client.post("/jobs/example/to-sonic?speed=0.8")
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertIn("Unsupported SONIC speed", invalid.json()["detail"])
 
     def test_sonic_conversion_is_cached_and_exposed_as_artifacts(self):
         job = self._make_succeeded_job("sonic.mp4")
         output_dir = Path(job["output_dir"])
-        frames = 2
+        frames = 4
         torch.save(
             {
                 "smpl_params_global": {
@@ -531,7 +560,47 @@ class ServiceWebTest(unittest.TestCase):
         )
         with zipfile.ZipFile(updated["artifacts"]["artifacts_zip_path"]) as archive:
             self.assertIn("sonic_reference.npz", archive.namelist())
-            self.assertIn("sonic_conversion.json", archive.namelist())
+        self.assertIn("sonic_conversion.json", archive.namelist())
+
+    def test_sonic_slowdown_keeps_50_fps_and_uses_an_isolated_cache(self):
+        job = self._make_succeeded_job("sonic-slow.mp4")
+        output_dir = Path(job["output_dir"])
+        frames = 31
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.zeros((frames, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((frames, 63), dtype=torch.float32),
+                }
+            },
+            output_dir / "hmr4d_results.pt",
+        )
+        controller = CompletingSonicController()
+        with patch(
+            "hmr4d.utils.sonic.SonicPlaybackController",
+            return_value=controller,
+        ):
+            normal = self.manager.send_to_sonic(job["job_id"], speed=1.0)
+            slow = self.manager.send_to_sonic(job["job_id"], speed=0.75)
+            reused = self.manager.send_to_sonic(job["job_id"], speed=0.75)
+
+        self.assertEqual(normal["fps"], 50.0)
+        self.assertEqual(slow["fps"], 50.0)
+        self.assertEqual(normal["speed"], 1.0)
+        self.assertEqual(slow["speed"], 0.75)
+        self.assertGreater(slow["frames"], normal["frames"])
+        self.assertAlmostEqual(slow["duration_s"] / normal["duration_s"], 4 / 3, places=1)
+        self.assertFalse(slow["reused"])
+        self.assertTrue(reused["reused"])
+        self.assertTrue((output_dir / "sonic_reference.npz").is_file())
+        self.assertTrue((output_dir / "sonic_reference_speed_0_75.npz").is_file())
+        self.assertTrue((output_dir / "sonic_conversion_speed_0_75.json").is_file())
+        updated = self.manager.get_job(job["job_id"])
+        self.assertEqual(updated["sonic_speed"], 0.75)
+        self.assertEqual(
+            Path(updated["artifacts"]["sonic_reference_path"]),
+            output_dir / "sonic_reference_speed_0_75.npz",
+        )
 
     def test_sonic_pause_stops_live_stream_and_marks_idle_fallback(self):
         job = self._make_succeeded_job("pause-sonic.mp4")

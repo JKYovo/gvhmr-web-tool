@@ -1625,6 +1625,261 @@ conda run -n gvhmr python tools/sonic/play_reference.py \
 
 ---
 
+## P24：长视频预览 SMPL-X 分批生成
+
+### 基本信息
+
+- 日期：2026-08-13
+- 分支：`main`
+- 状态：GPU 验证完成，Web 预览已生成
+- 上游依据或实验基线：`xbd` Web job，7162 帧/30 FPS；原预览在 `render_incam` 一次性 LBS 时 OOM
+- 范围：incam/global 预览的 SMPL-X→SMPL 顶点生成内存上界
+- 不包含：降低渲染分辨率、跳帧、改变 renderer、改变 SMPL/GVHMR 数值结果
+
+### 优化目标
+
+修复长视频在预览开始时将整段 SMPL-X 参数一次性送入 GPU，导致 12 GB RTX 3060 OOM 的问题；保持原帧数、分辨率、视角和编码逻辑。
+
+### 关键实现
+
+- `smplx_to_smpl_vertices_batched()` 默认按 128 帧执行 SMPL-X LBS 和稀疏 SMPL-X→SMPL 顶点转换，逐批移回 CPU 后拼接。
+- incam 渲染继续逐帧把顶点送入原 Renderer；global 的 J regressor、对齐和相机轨迹计算留在 CPU，实际渲染时只上传当前帧。
+- 参数序列长度不一致、空序列或非法 batch size 会明确失败，不静默截短。
+
+### 验证方法与结果
+
+- 用 xbd 的真实前 5 帧比较原整批路径和新 2 帧小批路径：输出 `[5,6890,3]`，全部 finite；最大绝对误差 `7.15e-7 m`（约 `0.0007 mm`），为 CUDA 批大小的浮点累加差异。
+- 原失败位置需要额外申请 `1.12 GiB` 并 OOM；修复后 7162 帧顶点生成和渲染成功，worker 渲染期间显存约 `0.74 GiB`。
+- Web job `job_8565848b9d88` 的 preview 状态由 failed 变为 succeeded，错误清空。
+- incam、global、并排视频均为 7162 帧、30 FPS、238.734 秒；分辨率分别为 `1160×650`、`1160×650`、`2320×650`。
+
+### 未完成项和已知风险
+
+- 顶点 CPU 缓存仍随视频长度线性增长；7162 帧约在本机内存范围内，更长视频可进一步改为顶点磁盘分块或边生成边渲染。
+- 两个视角仍各渲染一次完整视频，修复内存但不降低约 24 分钟的预览耗时。
+
+### 回退方式
+
+恢复 incam/global 中原来一次性 `smplx(**to_cuda(params))` 的两处调用即可；但长视频会重新出现 OOM。
+
+### 主要涉及文件
+
+- `tools/demo/demo.py`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P25：关闭自动平地的 raw 结果回退
+
+### 基本信息
+
+- 日期：2026-08-13
+- 分支：`main`
+- 状态：`CPU 已验证`
+- 范围：Web 自动平地 Global V1.1 的结果选择和失败语义
+- 不包含：修改 Global V1.1 求解器、阈值或历史任务产物
+
+### 变更内容
+
+- `diagnostic_pass` 与 `guardrail_failed` 只要都生成了有效候选 PT 和可解析 metrics，均采用 Global V1.1 候选作为主 `hmr4d_results.pt`。
+- guardrail 不通过不再恢复 `hmr4d_results_raw.pt`，而是记录 `ground_constraint_warning`，在任务详情中显示诊断提示。
+- 后处理脚本异常、候选缺失、metrics 缺失/损坏或 decision 非法时直接使 Web 任务失败，并明确提示 raw fallback 已关闭。
+- `hmr4d_results_raw.pt` 继续保留用于下载和人工对比，但不再自动成为成功任务的发布结果。
+- 历史任务不自动改写，既有 `fallback` 状态和文件保持原样。
+
+### 验证方法与结果
+
+在 `gvhmr` 环境运行 Web 服务回归测试，覆盖正常采用、guardrail 警告仍采用候选、脚本异常使任务失败且不调用旧 local-Y，以及任务字段持久化。另执行 Python/JavaScript 语法检查与 `git diff --check`。
+
+### 风险与恢复方式
+
+关闭保护回退意味着过大的 XYZ 修正也会被发布；`ground_constraint_warning` 和 metrics 必须用于人工判断。页面仍可选择“不启用”来完全绕过地面后处理。若要恢复旧行为，可恢复 worker 中只接受 `diagnostic_pass` 并复制 raw 的分支。
+
+### 主要涉及文件
+
+- `hmr4d/service/external_core_worker.py`
+- `hmr4d/service/manager.py`
+- `hmr4d/service/store.py`
+- `hmr4d/service/static_app/app.js`
+- `tests/test_service_web.py`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P26：GVHMR Web → SONIC 真机安全启动文档
+
+### 基本信息
+
+- 日期：2026-08-13
+- 分支：`main`
+- 状态：文档完成，待真机验证
+- 上游依据或实验基线：`/home/user-kevien/kimodo/KIMODO_SONIC_REAL_ROBOT_QUICKSTART.md`
+- 范围：GVHMR Web 内置 SONIC publisher 通过 5558 隔离隧道接入 ELF3 真机
+- 不包含：修改真机控制器、SONIC policy、`raindrop` overlay 或 Web 推流代码
+
+### 优化目标
+
+把已在 Kimodo 中验证的真机启动、链路隔离、状态切换和急停要求改写为 GVHMR Web 可直接执行的流程，避免再启动 Kimodo 或误占官方 PICO/5557 链路。
+
+### 关键实现
+
+- 明确 Web 本机 5557 → SSH reverse tunnel → 机器人 5558 → `raindrop` SONIC policy 的数据路径。
+- 区分 Kimodo 长期占用 5557 和 Web 仅播放期间绑定 5557 的行为：推流前只要求机器人 5558 `LISTEN`，推流过程再验证 `ESTAB`。
+- 保留已部署 overlay 所需的 `SONIC_REFERENCE_MODE=kimodo`，并解释它只是隔离模式的历史名称。
+- 写入单一硬件控制器、单一 keyboard publisher、ROS Domain 31、Fast DDS root 用户一致性和逐级状态切换检查。
+- 区分 Web“暂停 SONIC”与实体急停，加入首次仅限短、慢、小幅动作的验收边界。
+- 纳入本地仿真实测的 `SCHED_FIFO/99` 调度检查，但不将仿真结果当作真机验收。
+
+### 验证方法与结果
+
+- 核对 Kimodo 真机 Quickstart 中的机器人 IP、工作区 source 顺序、Domain 31、5558 隧道、真机 launch 和状态键。
+- 核对 Web 当前“发送到 SONIC / 暂停 SONIC”语义及 50 FPS reference 输出。
+- 本次仅修改 Markdown，未连接或驱动真机，因此真机仍需按文档的首次记录项验收。
+
+### 未完成项和已知风险
+
+- ZMQ PUB 无 ACK，Web 推流完成不等于真机完整执行。
+- `SONIC_REFERENCE_MODE=kimodo` 属于机器人端现有部署约定，后续如改名需同步 overlay 和文档。
+- 真机的实时调度、关节限位、自碰和支撑稳定性尚未在本次修改中实测。
+
+### 回退方式
+
+删除真机 Quickstart 和 README 导航项即可；本次没有代码或部署状态需要回退。
+
+### 主要涉及文件
+
+- `docs/SONIC_REAL_ROBOT_QUICKSTART.md`
+- `README.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P27：Web SONIC 动作速度倍率
+
+### 基本信息
+
+- 日期：2026-08-13
+- 分支：`main`
+- 状态：CPU 已验证，待 MuJoCo/真机人工确认
+- 上游依据或实验基线：新版 qhy 正常速度与旧 qhy 意外半速 SONIC reference 对比
+- 范围：Web 任务详情中的 SONIC 输入端动作速度和倍率隔离缓存
+- 不包含：修改 GVHMR 推理帧率、SONIC 50 Hz 控制频率、SONIC policy 或机器人控制器
+
+### 优化目标
+
+当正常速度舞蹈超过机器人腿部跟踪带宽时，允许只降低发送给 SONIC 的动作速度，不再通过错误解释视频 FPS 获得偶然的慢放效果，也不修改 GVHMR 结果和预览。
+
+### 关键实现
+
+- 任务详情操作栏增加“SONIC 速度”按钮，在 `1.0× → 0.75× → 0.5×` 三档循环，默认 `1.0×`。
+- API `POST /jobs/{job_id}/to-sonic?speed=<倍率>` 仅接受上述三档，其他值明确返回错误。
+- 倍率作用于源动作时间轴：`0.75×` 使用等效 22.5 FPS 源时间，`0.5×` 使用等效 15 FPS 源时间，再通过现有旋转 SLERP 输出固定 50 FPS reference。
+- `1.0×` 继续使用 `sonic_reference.npz`；慢速档分别使用带倍率的 NPZ/JSON 文件，并同时校验源 PT SHA256 和等效源 FPS，避免缓存混用。
+- 当前播放倍率写入任务状态、提示文本和 conversion metadata；重新发送会安全替换当前 Web publisher。
+
+### 接口、配置与资产变化
+
+- 新增可选查询参数 `speed`，默认 `1.0`，保持旧 API 调用兼容。
+- 新增任务字段 `sonic_speed`，历史任务缺失时按 `1.0` 展示。
+- 慢速缓存示例：`sonic_reference_speed_0_75.npz`、`sonic_conversion_speed_0_75.json`。
+- SONIC 输出频率始终为 50 FPS；倍率不会改写 `hmr4d_results.pt`。
+
+### 验证方法与结果
+
+- `python -m unittest discover -s tests -p 'test_service_web.py' -v`：25 项全部通过。
+- `tools.sonic.test_sonic`：4 项通过，覆盖协议窗口、转换、播放和暂停。
+- JavaScript `node --check` 通过。
+- qhy `0.75×` 实际生成 1674 帧、50 FPS、33.46 秒；原 `1.0×` 为 1256 帧、50 FPS、25.1 秒。
+- qhy 平均关节变化速率由 `7.61` 降至 `5.73`，P95 由 `15.33` 降至 `11.49`，约为正常速度的 75%。
+
+### 未完成项和已知风险
+
+- 降速能减轻跟踪带宽压力，但不能从算法上消除机器人足端滑动；最终仍需 MuJoCo 与真机人工确认。
+- 当前倍率是页面会话选择，不会在不同浏览器或服务重启后保留为默认值；实际播放倍率会写入任务记录。
+- 仅提供不高于正常速度的三档，避免误操作加速高动态动作。
+
+### 回退方式
+
+移除速度按钮和 API 查询参数，并恢复 `send_to_sonic(job_id)` 固定按 30→50 FPS 转换即可；已有慢速缓存不会影响默认 reference。
+
+### 主要涉及文件
+
+- `hmr4d/service/server.py`
+- `hmr4d/service/manager.py`
+- `hmr4d/service/store.py`
+- `hmr4d/service/static_app/index.html`
+- `hmr4d/service/static_app/app.js`
+- `tests/test_service_web.py`
+- `README.md`
+- `docs/SONIC_REAL_ROBOT_QUICKSTART.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P28：长视频精确推理、内存上界与非模型产物加速
+
+### 基本信息
+
+- 日期：2026-08-13
+- 分支：`main`
+- 状态：GPU/CPU 回归完成，源码 Web 已接入
+- 上游依据或实验基线：xbd Web job `job_8565848b9d88`，7162 帧/30 FPS/238.7 秒
+- 范围：长视频模型 OOM、预处理内存峰值、官方 postproc 复杂度、极端长度续跑、ZIP 和预览合并
+- 不包含：降低 ViTPose/HMR2 精度、跳帧推理、重新生成 xbd、缩短两个完整视角本身的逐帧渲染
+
+### 优化目标
+
+旧 xbd 需要 15 个独立 600 帧窗口、480 帧步长和 120 帧 overlap，实际重复推理约 26%，并重复加载模型、检测、ViTPose、HMR2 特征和视频编码。目标是优先保持整段 GVHMR/FootMR 数值语义，避免长序列注意力 OOM，并把分窗降为极端情况的自动兜底。
+
+### 关键实现
+
+- ≥1800 帧默认把 GVHMR 与 FootMR 的 attention 从 dense masked 实现切到局部实现。网络原本对超过 120 帧的序列就只允许每个 query 访问局部 120 帧；新实现不再分配 `L×L` score/mask，数学含义不变。
+- 整段仍统一计算 sequence betas、global root rollout、FootMR ankle residual 和官方 contact/IK postproc，不发生窗口拼接。短视频继续走原 dense 整段路径。
+- 静态相机 postproc 的两个“每帧修改所有未来帧”循环改成等价累计修正：相机修正保留原递推阈值，接触位移用 cumulative sum，复杂度从 O(L²) 降为 O(L)。
+- ViTPose 与 HMR2 同时未命中缓存时继续共享相同人体 crop；≥1800 帧改为逐帧解码并写任务目录 float32 mmap，避免同时常驻全视频 RGB 和数 GB crop tensor。两模型完成后清理 mmap；中途失败则保留用于重试。
+- 若极端序列仍在整段 FK/IK 触发 CUDA OOM，自动切换共享预处理、单模型常驻的 600/480 网络窗口。窗口按视频 SHA、有效 FootMR checkpoint SHA 和配置隔离，逐窗口原子缓存，可断点续跑；动态 overlap、root yaw/translation 对齐和 rotation SLERP 用于拼接。
+- 长视频模式、模型身份、耗时、是否发生窗口 fallback 写入 `long_video/manifest.json` 与 `metrics.json`，并进入 Web artifact 和 ZIP。
+- ZIP 对 MP4/PT/NPZ 等已经压缩或大二进制使用 `ZIP_STORED`，JSON/文本仍 Deflate；并排预览的二次编码显式使用 `libx264 veryfast`。二者不改变模型输入或 SMPL tensor。
+- 输入视频规范化曾实验 `veryfast`，但因重编码像素变化导致 qhy SMPL 有可测差异，已经撤回，继续使用原输入编码逻辑。
+
+### 验证方法与结果
+
+- 单元/服务：`35/35` 通过，覆盖 dense/local 等价、7162 窗口覆盖、旋转 SLERP、gap/triple overlap 拒绝、缓存身份/续跑、流式 crop 与原内存 crop bit-identical、两个累计 postproc 与旧 suffix 循环等价、ZIP 压缩类型与内容一致。
+- qhy 754 帧真实特征 A/B：原 dense 和整段 local 的整个结果树逐 tensor `torch.equal`，incam/global、net_outputs 均逐 bit 一致。local 主网络+FootMR+官方 postproc 为 `0.91 s`，CUDA peak allocated `253 MB`。
+- 7162 帧合成真实特征序列：整段 local 主网络+FootMR+root rollout+官方 postproc `2.83 s`，CUDA peak allocated `475.6 MB`；incam/global 全部 finite 且 shape 正确。因此 xbd 长度在 12 GB GPU 上不需要默认分窗。
+- 真实旧 qhy raw 与新 O(L) postproc 对比：incam 完全相等；global 最大 root 差 `1.03e-6 m`、最大 pose 差 `0.000203°`，来自累计加法顺序的浮点误差。
+- 分窗安全性实验仍保留：qhy 600/480 两窗的 incam body P95 相对整段为 `0.024°`、root translation P95 为 `0.48 mm`，窗口连接处姿态/root step 不高于原序列 P95；但整段重跑非线性 IK 会放大 global 脚踝差异，所以分窗只作为 OOM fallback，不作为常规输出。
+- 输入 `veryfast` 实验：qhy 60→30 FPS 保持 754 帧和 25.13 秒，但相对原编码结果 body P95 约 `1.3°`、global root P95 约 `2.3 cm`。该项未采用。
+- 非模型产物实测：xbd 的 PT+两个 MP4+JSON 共 135.3 MB 使用直存 ZIP 为 `4.81 s`；qhy 3840×1080、754 帧并排 veryfast 合并为 `13.72 s`，输出仍为 754 帧、30 FPS、25.13 秒。
+- P6 FPS/缓存检查通过；Python compileall、JavaScript syntax、`git diff --check` 均通过。
+
+### 性能预期与边界
+
+- 旧 xbd 分块实际处理约 9000 帧；新默认视觉预处理只处理 7162 帧一次，消除约 26% overlap 重复、15 次模型加载和15次分块视频编码。精确总加速仍需下一条真实长视频完成后以 Web metrics 记录，不能由 qhy 外推成固定倍数。
+- xbd 历史 15 个窗口产物目录已被清理，只保留最终 7162 帧 tensor 和 metrics，因此没有伪造新旧窗口逐文件 A/B，也没有覆盖历史任务。
+- 流式 mmap 降低 RAM 峰值，但会暂用磁盘：float32 crop 每帧约 0.75 MiB，7162 帧约 5.25 GiB；成功后自动删除。任务中断后保留是为了续跑，必要时可人工清理该任务 `preprocess/shared_crops_float32.mmap*`。
+- 当前推理结果的精确路径无法跨进程从头续跑视觉模型内部 batch；已有 bbox/pose/features 内容缓存以及极端 OOM fallback 窗口缓存可以续跑。完整“ViTPose/HMR2 每批落盘续跑”仍是后续项。
+
+### 回退方式
+
+将 external worker 的长视频 `cfg.attention_impl/network.attention_impl` 恢复为 dense 即回到旧整段行为，但会重新出现长序列 OOM；也可提高 `GVHMR_LONG_VIDEO_THRESHOLD_FRAMES` 暂时关闭自动 local。删除 `long_video.py` 路由可取消 OOM 分窗兜底，不影响短视频。
+
+### 主要涉及文件
+
+- `hmr4d/service/external_core_worker.py`
+- `hmr4d/utils/long_video.py`
+- `hmr4d/network/base_arch/transformer/encoder_rope.py`
+- `hmr4d/model/gvhmr/utils/postprocess.py`
+- `hmr4d/utils/preproc/vitfeat_extractor.py`
+- `tools/demo/demo.py`
+- `hmr4d/service/common.py`
+- `hmr4d/service/manager.py`
+- `hmr4d/utils/video_io_utils.py`
+- `tests/test_long_video.py`
+- `tests/test_service_web.py`
+
+---
+
 ## 后续优化记录模板
 
 复制以下小节并追加到本文档，不能覆盖历史记录。

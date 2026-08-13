@@ -27,7 +27,7 @@ from hmr4d.utils.vis.cv2_utils import draw_bbx_xyxy_on_image_batch, draw_coco_sk
 
 from hmr4d.utils.preproc import Tracker, Extractor, VitPoseExtractor, SimpleVO
 from hmr4d.utils.preproc.content_cache import PreprocessContentCache, file_identity, sha256_file
-from hmr4d.utils.preproc.vitfeat_extractor import get_batch
+from hmr4d.utils.preproc.vitfeat_extractor import get_batch, get_or_create_batch_memmap
 from hmr4d.network.hmr2 import HMR2A_CKPT
 
 from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, estimate_K, convert_K_to_K4, create_camera_sensor
@@ -43,6 +43,30 @@ from einops import einsum, rearrange
 
 
 CRF = 23  # 17 is lossless, every +6 halves the mp4 size
+RENDER_SMPLX_BATCH_SIZE = 128
+
+
+@torch.no_grad()
+def smplx_to_smpl_vertices_batched(smplx, smplx2smpl, params, batch_size=RENDER_SMPLX_BATCH_SIZE):
+    """Generate SMPL render vertices without putting a whole long sequence on CUDA."""
+    lengths = {int(value.shape[0]) for value in params.values() if torch.is_tensor(value)}
+    if len(lengths) != 1:
+        raise ValueError(f"SMPL-X render parameter lengths do not match: {sorted(lengths)}")
+    length = lengths.pop()
+    if length < 1 or batch_size < 1:
+        raise ValueError(f"Invalid render length/batch size: {length}/{batch_size}")
+    chunks = []
+    for start in range(0, length, batch_size):
+        end = min(start + batch_size, length)
+        batch = {
+            key: value[start:end] if torch.is_tensor(value) else value
+            for key, value in params.items()
+        }
+        vertices = smplx(**to_cuda(batch)).vertices
+        converted = torch.stack([torch.matmul(smplx2smpl, frame) for frame in vertices])
+        chunks.append(converted.cpu())
+        del vertices, converted
+    return torch.cat(chunks, dim=0)
 
 
 def parse_args_to_cfg():
@@ -382,9 +406,32 @@ def run_preprocess(cfg, profiler=None):
     need_features = not Path(paths.vit_features).exists()
     shared_imgs = None
     shared_bbx_xys = None
-    if need_pose and need_features and not cfg.use_sapiens and bool(getattr(cfg, "shared_preprocess", False)):
+    use_shared_crop = (
+        not cfg.use_sapiens
+        and bool(getattr(cfg, "shared_preprocess", False))
+        and (
+            (need_pose and need_features)
+            or (expected_length >= 1800 and (need_pose or need_features))
+        )
+    )
+    if use_shared_crop:
         with profiler.section("preprocess.shared_decode_crop"):
-            shared_imgs, shared_bbx_xys = get_batch(video_path, bbx_xys, img_ds=0.5)
+            if expected_length >= 1800:
+                # Keep the large temporary mapping with the job. A failed run
+                # can resume it, while a completed pose+feature pass removes it.
+                shared_crop_path = Path(cfg.preprocess_dir) / "shared_crops_float32.mmap"
+                shared_imgs, shared_bbx_xys, reused_shared_crop = get_or_create_batch_memmap(
+                    video_path,
+                    bbx_xys,
+                    shared_crop_path,
+                    source_sha256=content_cache.video_sha256,
+                    img_ds=0.5,
+                )
+                if reused_shared_crop:
+                    Log.info(f"[Cache] Restored shared crop -> {shared_crop_path}")
+            else:
+                shared_crop_path = None
+                shared_imgs, shared_bbx_xys = get_batch(video_path, bbx_xys, img_ds=0.5)
 
     if need_pose:
         if cfg.use_sapiens:
@@ -429,6 +476,13 @@ def run_preprocess(cfg, profiler=None):
     else:
         Log.info(f"[Preprocess] vit_features from {paths.vit_features}")
         store_cache("features", feature_cache_options, paths.vit_features)
+    if shared_imgs is not None:
+        del shared_imgs
+    if "shared_crop_path" in locals() and shared_crop_path is not None:
+        shared_crop_path.unlink(missing_ok=True)
+        shared_crop_path.with_suffix(shared_crop_path.suffix + ".json").unlink(
+            missing_ok=True
+        )
 
     # Get visual odometry results
     if not static_cam:  # use slam to get cam rotation
@@ -508,8 +562,9 @@ def render_incam(cfg, profiler=None):
         smplx = make_smplx("supermotion").cuda()
         smplx2smpl = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").cuda()
         faces_smpl = make_smplx("smpl").faces
-        smplx_out = smplx(**to_cuda(pred["smpl_params_incam"]))
-        pred_c_verts = torch.stack([torch.matmul(smplx2smpl, v_) for v_ in smplx_out.vertices])
+        pred_c_verts = smplx_to_smpl_vertices_batched(
+            smplx, smplx2smpl, pred["smpl_params_incam"]
+        )
 
     # -- rendering code -- #
     video_path = cfg.video_path
@@ -552,9 +607,10 @@ def render_global(cfg, profiler=None):
         smplx = make_smplx("supermotion").cuda()
         smplx2smpl = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").cuda()
         faces_smpl = make_smplx("smpl").faces
-        J_regressor = torch.load("hmr4d/utils/body_model/smpl_neutral_J_regressor.pt").cuda()
-        smplx_out = smplx(**to_cuda(pred["smpl_params_global"]))
-        pred_ay_verts = torch.stack([torch.matmul(smplx2smpl, v_) for v_ in smplx_out.vertices])
+        J_regressor = torch.load("hmr4d/utils/body_model/smpl_neutral_J_regressor.pt").cpu()
+        pred_ay_verts = smplx_to_smpl_vertices_batched(
+            smplx, smplx2smpl, pred["smpl_params_global"]
+        )
 
     def move_to_start_point_face_z(verts):
         "XZ to origin, Start from the ground, Face-Z"
@@ -596,7 +652,7 @@ def render_global(cfg, profiler=None):
     with profiler.section("render.global_frames_encode"):
         for i in tqdm(range(render_length), desc=f"Rendering Global"):
             cameras = renderer.create_camera(global_R[i], global_T[i])
-            img = renderer.render_with_ground(verts_glob[[i]], color[None], cameras, global_lights)
+            img = renderer.render_with_ground(verts_glob[[i]].cuda(), color[None], cameras, global_lights)
             writer.write_frame(img)
     writer.close()
 

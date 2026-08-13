@@ -197,7 +197,15 @@ def merge_videos_horizontal(in_video_paths: list, out_video_path: str):
         raise ValueError("At least two video paths are required for merging.")
     inputs = [ffmpeg.input(path) for path in in_video_paths]
     merged_video = ffmpeg.filter(inputs, "hstack", inputs=len(inputs))
-    output = ffmpeg.output(merged_video, out_video_path)
+    output = ffmpeg.output(
+        merged_video,
+        out_video_path,
+        vcodec="libx264",
+        preset="veryfast",
+        crf=23,
+        pix_fmt="yuv420p",
+        an=None,
+    )
     ffmpeg.run(output, overwrite_output=True, quiet=True)
 
 
@@ -206,5 +214,13 @@ def merge_videos_vertical(in_video_paths: list, out_video_path: str):
         raise ValueError("At least two video paths are required for merging.")
     inputs = [ffmpeg.input(path) for path in in_video_paths]
     merged_video = ffmpeg.filter(inputs, "vstack", inputs=len(inputs))
-    output = ffmpeg.output(merged_video, out_video_path)
+    output = ffmpeg.output(
+        merged_video,
+        out_video_path,
+        vcodec="libx264",
+        preset="veryfast",
+        crf=23,
+        pix_fmt="yuv420p",
+        an=None,
+    )
     ffmpeg.run(output, overwrite_output=True, quiet=True)

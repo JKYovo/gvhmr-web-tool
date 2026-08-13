@@ -14,6 +14,7 @@
 - 可选 Contact Global V1.1 自动平地约束：按 toe/heel 接触连续置信度整段优化 root XYZ
 - Human3R 场景约束代码已纳入实验工具，但 Web 中暂不启用
 - SQLite 任务持久化、状态筛选、取消和失败重试
+- 长视频整段精确 local attention、内存受控共享裁剪和极端 OOM 断点续跑
 - 推理完成后按需生成预览，预览失败不会破坏人体动作结果
 - 页面内播放预览，并分别下载 PT、相机视角、全局视角或 ZIP
 - 上传临时文件自动清理，任务输入和结果统一保存在任务目录
@@ -59,6 +60,35 @@ bash start_web_source.sh
 
 源码启动默认以当前仓库作为算法 core；只有需要切换其他 worktree 时才设置 `GVHMR_CORE_ROOT`。Docker 启动路径目前仍保留原始 GVHMR baseline。
 
+## 长视频优化
+
+源码 Web 对不少于 1800 帧的视频自动启用整段精确 local attention。GVHMR 和
+FootMR 原本在长序列上就使用 120 帧局部注意力范围，新实现跳过无用的完整
+`L×L` 注意力矩阵，但仍然整段计算 betas、FootMR 脚踝残差、global root rollout
+和官方 contact/IK 后处理。因此正常长视频不切块、不拼接，也不会引入分块边界跳变。
+
+长视频预处理会把 ViTPose 和 HMR2 共用的人体 crop 逐帧写入任务目录的临时
+磁盘映射，避免全视频图像和数 GB float crop 同时驻留内存；成功提取 pose 和
+features 后自动删除。静态相机后处理中的未来帧重复更新也已改成数学等价的
+线性累计计算。只有极端序列仍在整段 FK/IK 触发 CUDA OOM 时，才自动回退到
+600 帧窗口、480 帧步长的缓存续跑模式。
+
+当前验证结果：
+
+- qhy 754 帧的原 dense 与新 local 输出树逐 tensor、逐 bit 一致。
+- 7162 帧真实特征合成序列的完整主网络、FootMR、root rollout 和官方后处理耗时
+  `2.83 s`，CUDA peak allocated 为 `475.6 MB`；这不是包含 YOLO、ViTPose、
+  HMR2 和视频编码的端到端总耗时。
+- 旧 xbd 分块流程实际处理约 9000 帧；新默认路径只预处理原始 7162 帧一次，
+  消除约 26% overlap 重复和反复加载模型、切片编码的开销。完整端到端加速倍率
+  需要由下一条真实长视频的任务 metrics 测量，不能由上述主网络耗时直接外推。
+- 曾测试加快输入 H.264 转码，但 qhy 的 body P95 变化约 `1.3°`、global root P95
+  变化约 `2.3 cm`，因此没有采用。当前不会用降低输入质量换速度。
+
+长视频任务会额外保存 `long_video/manifest.json` 和 `long_video/metrics.json`，记录
+实际模式、模型身份、耗时以及是否发生 OOM 窗口回退。完整实验和风险边界见
+[优化记录 P28](docs/OPTIMIZATION_LOG.md#p28长视频精确推理内存上界与非模型产物加速)。
+
 ## 输出内容
 
 每个任务默认保存到：
@@ -73,10 +103,11 @@ runtime/jobs/<视频名>_<任务短 ID>/
 - `hmr4d_results_raw.pt`：启用自动平地时保留的原始 FootMR 结果
 - `ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt`：通过保护条件的 V1.1 候选
 - `ground_constraint_global_v1_1/metrics.json`：接触、修正量、保护条件和最终决策
+- `long_video/manifest.json`、`long_video/metrics.json`：长视频推理模式、模型身份和耗时
 - `job.json`：任务摘要
 - `artifacts.zip`：当前可用结果的打包文件
 
-自动平地从原始 FootMR tensor 单次运行，只修改 `smpl_params_global.transl`，不会再串联旧 local-Y 后处理。V1.1 执行失败或保护条件未通过时直接回退 `hmr4d_results_raw.pt`。页面/API 为兼容现有调用仍使用 `flat_y` 选项值，但它现在表示 Global V1.1。
+自动平地从原始 FootMR tensor 单次运行，只修改 `smpl_params_global.transl`，不会再串联旧 local-Y 后处理。按当前发布策略，保护项未通过但候选完整时仍发布约束结果并在任务详情显示诊断警告；脚本异常、候选缺失或 metrics 损坏会直接使任务失败，不再静默回退 raw。`hmr4d_results_raw.pt` 仍保留供下载和人工对照。页面/API 为兼容现有调用仍使用 `flat_y` 选项值，但它现在表示 Global V1.1。
 
 ## SONIC 接入（无需 Kimodo）
 
@@ -110,6 +141,11 @@ jntm、lly、cxk、qhy、ydd 与旧 Kimodo 输入逐元素验证，数组最大�
 当前 ZMQ PUB 协议没有 ACK；页面“推流完成”仅表示 Web 端发完，不能证明
 SONIC 已实际接收。使用按钮前应先启动 SONIC/MuJoCo。
 
+任务详情中的“SONIC 速度”按钮可在 `1.0× / 0.75× / 0.5×` 间循环。
+倍率只调整发送给 SONIC 的动作时间轴，各档均通过旋转 SLERP 重新采样并保持
+50 FPS 控制输入；不会改写 GVHMR tensor、预览视频或原始动作速度。不同倍率使用
+独立 reference 缓存，适合在机器人腿部跟不上正常速度时逐级降低速度验证。
+
 按需生成的预览：
 
 - `1_incam.mp4`
@@ -121,6 +157,7 @@ SONIC 已实际接收。使用按钮前应先启动 SONIC/MuJoCo。
 ## 文档
 
 - [快速开始](docs/QUICKSTART.md)
+- [GVHMR Web → ELF3 SONIC 真机 Quickstart](docs/SONIC_REAL_ROBOT_QUICKSTART.md)
 - [Docker 与局域网部署](docs/DEPLOYMENT.md)
 - [源码开发环境](docs/INSTALL.md)
 - [常见问题](docs/TROUBLESHOOTING.md)
