@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import imageio.v3 as iio
+import ffmpeg
 from scipy.spatial.transform import Rotation, Slerp
 
 from hmr4d.utils.long_video import (
@@ -24,6 +25,11 @@ from hmr4d.utils.preproc.vitfeat_extractor import (
     get_batch_memmap,
     get_or_create_batch_memmap,
     open_batch_memmap,
+)
+from hmr4d.utils.video_io_utils import (
+    get_video_fps_duration,
+    get_video_lwh,
+    normalize_video_fps,
 )
 from hmr4d.network.base_arch.transformer.encoder_rope import RoPEAttention
 
@@ -73,6 +79,32 @@ class FakeModel:
 
 
 class LongVideoTest(unittest.TestCase):
+    def test_normalization_pads_odd_dimensions_without_changing_timeline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "odd.mkv"
+            output = root / "normalized.mp4"
+            stream = ffmpeg.input(
+                "testsrc=s=1157x652:r=60:d=1", format="lavfi"
+            ).video
+            ffmpeg.run(
+                ffmpeg.output(
+                    stream,
+                    str(source),
+                    vcodec="ffv1",
+                    pix_fmt="yuv444p",
+                    an=None,
+                ),
+                overwrite_output=True,
+                quiet=True,
+            )
+            metadata = normalize_video_fps(source, output, target_fps=30, crf=23)
+            self.assertEqual(get_video_lwh(output), (30, 1158, 652))
+            output_fps, output_duration = get_video_fps_duration(output)
+            self.assertEqual(output_fps, 30)
+            self.assertAlmostEqual(output_duration, 1.0, places=2)
+            self.assertAlmostEqual(metadata["source_duration"], 1.0, places=2)
+
     def test_dense_and_memory_bounded_local_attention_are_exact(self):
         torch.manual_seed(20260813)
         attention = RoPEAttention(64, 4, dropout=0.0, attention_chunk_size=31).eval()

@@ -8,7 +8,7 @@
 
 ## 主要功能
 
-- 单视频与批量上传，支持 `mp4 / mov / avi / mkv / webm`
+- 单视频与批量上传，支持 `mp4 / mov / avi / mkv / webm`；输入统一按时间戳转为 30 FPS，奇数宽高会无损补齐至偶数
 - 静态相机和可选焦距 `f_mm`
 - FootMR COCO23 脚踝残差细化，以及隔离的预处理缓存
 - 可选 Contact Global V1.1 自动平地约束：按 toe/heel 接触连续置信度整段优化 root XYZ

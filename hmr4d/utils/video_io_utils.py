@@ -76,7 +76,24 @@ def normalize_video_fps(input_path, output_path, target_fps=30, crf=23):
 
     temporary = output_path.with_suffix(output_path.suffix + ".normalize-tmp.mp4")
     temporary.unlink(missing_ok=True)
+    stream = _probe_video_stream(input_path)
+    source_width = int(stream["width"])
+    source_height = int(stream["height"])
+    if _get_video_rotation(input_path) in {90, 270}:
+        source_width, source_height = source_height, source_width
+
     video = ffmpeg.input(str(input_path)).video.filter("fps", fps=target_fps, round="near")
+    # yuv420p/libx264 requires even dimensions. Preserve every source pixel and
+    # add at most one black column/row only for odd display-oriented inputs.
+    if source_width % 2 or source_height % 2:
+        video = video.filter(
+            "pad",
+            "ceil(iw/2)*2",
+            "ceil(ih/2)*2",
+            0,
+            0,
+            color="black",
+        )
     output = ffmpeg.output(
         video,
         str(temporary),
@@ -86,7 +103,13 @@ def normalize_video_fps(input_path, output_path, target_fps=30, crf=23):
         crf=crf,
         an=None,
     )
-    ffmpeg.run(output, overwrite_output=True, quiet=True)
+    try:
+        ffmpeg.run(output, overwrite_output=True, quiet=True)
+    except ffmpeg.Error as exc:
+        detail = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+        temporary.unlink(missing_ok=True)
+        suffix = f"\nFFmpeg: {detail}" if detail else ""
+        raise RuntimeError(f"Video normalization failed for {input_path}{suffix}") from exc
     temporary.replace(output_path)
     output_fps, output_duration = get_video_fps_duration(output_path)
     if abs(output_fps - target_fps) >= 1e-3:
