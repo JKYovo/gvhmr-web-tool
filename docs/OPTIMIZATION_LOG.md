@@ -2057,6 +2057,64 @@ conda run -n gvhmr python tools/sonic/play_reference.py \
 
 ---
 
+## P32：任务队列真实视频封面
+
+### 基本信息
+
+- 日期：2026-08-14
+- 分支：`main`
+- 状态：CPU 与浏览器链路已验证
+- 上游依据或实验基线：P31 任务条目的字母渐变占位图
+- 范围：任务队列缩略图生成、缓存、按需加载与失败回退
+- 不包含：修改视频输入、推理、预览渲染、任务产物下载或数据库 schema
+
+### 优化目标
+
+用任务原视频的真实画面替代字母占位，使相似命名的任务可以直接通过画面识别，同时避免任务较多时浏览器并行加载大量视频或服务端同时启动大量解码进程。
+
+### 关键实现
+
+- 新增 `GET /jobs/{job_id}/thumbnail`，优先读取任务输入视频，并从前 30 帧中选择代表帧。
+- FFmpeg 输出 192×176 的居中裁剪 JPEG，缓存为任务目录下的 `web_thumbnail.jpg`；同一任务后续请求直接读取缓存。
+- 服务端串行保护首次缩略图生成，避免多个可见任务同时争抢 CPU、磁盘和解码器。
+- 前端使用以任务队列为 root 的 `IntersectionObserver`，只请求当前可见及上下 80px 范围内的封面，不为全部 80 个任务同时解码。
+- 缩略图加载前或生成失败时继续显示原字母占位，不影响任务选择、状态刷新和进度更新。
+- 静态资源版本更新为 `20260814-video-thumbnails`。
+
+### 接口、配置与资产变化
+
+- 新增只读封面接口；响应类型为 `image/jpeg`，浏览器缓存时间为 7 天。
+- `web_thumbnail.jpg` 是可重新生成的 Web 缓存，不加入任务结果 ZIP，也不写入任务数据库。
+- 没有新增依赖；复用 Web 输入规范化已经依赖的 FFmpeg。
+
+### 验证方法与结果
+
+- 单元测试验证第一次请求调用一次 FFmpeg、第二次请求复用相同 JPEG 缓存，并检查缩略图 filter 参数。
+- `python -m unittest discover -s tests -p 'test_service_web.py' -v`：28/28 通过。
+- `python -m unittest tools.sonic.test_sonic -v`：4/4 通过。
+- `node --check hmr4d/service/static_app/app.js` 与 `git diff --check` 通过。
+
+### 未完成项和已知风险
+
+- 前 30 帧如果全黑或主体尚未入画，代表帧也可能不理想；当前先保证低成本、确定性和缓存稳定。
+- 输入文件缺失、损坏或 FFmpeg 解码失败时只回退字母占位，不会影响任务本身。
+
+### 回退方式
+
+移除封面接口、前端懒加载和图片样式即可恢复 P31 字母占位；已有 `web_thumbnail.jpg` 可以保留或手工删除。
+
+### 主要涉及文件
+
+- `hmr4d/service/server.py`
+- `hmr4d/service/static_app/app.js`
+- `hmr4d/service/static_app/styles.css`
+- `hmr4d/service/static_app/index.html`
+- `tests/test_service_web.py`
+- `README.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
 ## 后续优化记录模板
 
 复制以下小节并追加到本文档，不能覆盖历史记录。

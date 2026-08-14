@@ -12,6 +12,7 @@ const state = {
   submitting: { single: false, batch: false },
   activeAction: null,
   sonicSpeed: 1.0,
+  thumbnailObserver: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -239,6 +240,32 @@ function setupFileDrops() {
   });
 }
 
+function loadVisibleJobThumbnails() {
+  state.thumbnailObserver?.disconnect();
+  const root = $("jobList");
+  const images = [...root.querySelectorAll("img[data-thumbnail-src]")];
+  const load = (image) => {
+    const source = image.dataset.thumbnailSrc;
+    if (!source) return;
+    delete image.dataset.thumbnailSrc;
+    image.addEventListener("load", () => image.closest(".job-thumb")?.classList.add("has-image"), { once: true });
+    image.addEventListener("error", () => image.remove(), { once: true });
+    image.src = source;
+  };
+  if (!("IntersectionObserver" in window)) {
+    images.forEach(load);
+    return;
+  }
+  state.thumbnailObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      state.thumbnailObserver?.unobserve(entry.target);
+      load(entry.target);
+    });
+  }, { root, rootMargin: "80px 0px" });
+  images.forEach((image) => state.thumbnailObserver.observe(image));
+}
+
 async function submitSingle(event) {
   event.preventDefault();
   if (state.submitting.single) return;
@@ -395,7 +422,7 @@ function renderJobs() {
     const initial = (fileName(job).trim()[0] || "V").toUpperCase();
     return `
       <article class="job-card ${job.job_id === state.selectedJobId ? "active" : ""}" data-job="${escapeHtml(job.job_id)}" tabindex="0">
-        <div class="job-thumb" aria-hidden="true"><span>${escapeHtml(initial)}</span></div>
+        <div class="job-thumb" aria-hidden="true"><img data-thumbnail-src="${api(`jobs/${job.job_id}/thumbnail`)}" alt=""><span>${escapeHtml(initial)}</span></div>
         <div class="job-body">
           <div class="job-top">
             <div class="job-name" title="${escapeHtml(fileName(job))}">${escapeHtml(fileName(job))}</div>
@@ -407,6 +434,7 @@ function renderJobs() {
       </article>`;
   }).join("");
   $("jobList").innerHTML = cards || `<div class="job-empty">${state.jobs.length ? "没有符合筛选条件的任务" : "暂无任务"}</div>`;
+  loadVisibleJobThumbnails();
 
   document.querySelectorAll(".job-card[data-job]").forEach((card) => {
     card.addEventListener("click", () => selectJob(card.dataset.job));
@@ -959,5 +987,8 @@ async function boot() {
   }
 }
 
-window.addEventListener("beforeunload", stopPolling);
+window.addEventListener("beforeunload", () => {
+  state.thumbnailObserver?.disconnect();
+  stopPolling();
+});
 boot().catch((error) => showToast(`页面初始化失败：${error.message}`, true));

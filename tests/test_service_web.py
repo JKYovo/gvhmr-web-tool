@@ -374,6 +374,28 @@ class ServiceWebTest(unittest.TestCase):
         reloaded = reloaded_manager.get_job(job["job_id"])
         self.assertEqual(Path(reloaded["artifacts"]["preview_video_path"]), preview_path)
 
+    def test_job_thumbnail_is_generated_once_and_cached(self):
+        job = self._make_succeeded_job("thumbnail.mp4")
+
+        def fake_ffmpeg(command, **_kwargs):
+            Path(command[-1]).write_bytes(b"\xff\xd8video-cover\xff\xd9")
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with patch("hmr4d.service.server.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "hmr4d.service.server.subprocess.run", side_effect=fake_ffmpeg
+        ) as run:
+            first = self.client.get(f"/jobs/{job['job_id']}/thumbnail")
+            second = self.client.get(f"/jobs/{job['job_id']}/thumbnail")
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.headers["content-type"], "image/jpeg")
+        self.assertEqual(first.content, b"\xff\xd8video-cover\xff\xd9")
+        self.assertEqual(second.content, first.content)
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args.args[0]
+        self.assertIn("thumbnail=30", command[command.index("-vf") + 1])
+        self.assertTrue(Path(job["output_dir"], "web_thumbnail.jpg").is_file())
+
     def test_open_folder_uses_selected_job_output_directory(self):
         job = self._make_succeeded_job("open-folder.mp4")
         with patch(

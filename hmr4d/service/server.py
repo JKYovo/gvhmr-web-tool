@@ -5,6 +5,7 @@ import shutil
 import site
 import subprocess
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from shutil import copyfileobj
@@ -59,6 +60,7 @@ from hmr4d.service.store import SQLiteJobStore
 
 STATIC_APP_DIR = Path(__file__).resolve().parent / "static_app"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+_THUMBNAIL_LOCK = threading.Lock()
 
 
 class JobCreateRequest(BaseModel):
@@ -231,6 +233,67 @@ def _artifact_path(job, artifact_key):
         return None
     path = Path(path)
     return path if path.exists() else None
+
+
+def _ensure_job_thumbnail(job):
+    output_dir = Path(job["output_dir"]).expanduser().resolve()
+    thumbnail_path = output_dir / "web_thumbnail.jpg"
+    if thumbnail_path.is_file() and thumbnail_path.stat().st_size > 0:
+        return thumbnail_path
+
+    with _THUMBNAIL_LOCK:
+        if thumbnail_path.is_file() and thumbnail_path.stat().st_size > 0:
+            return thumbnail_path
+
+        artifacts = job.get("artifacts", {})
+        candidates = [
+            Path(job.get("input_video") or ""),
+            Path(artifacts.get("input_video_path") or ""),
+            output_dir / "0_input_video.mp4",
+            *sorted(output_dir.glob("submitted_input.*")),
+            Path(artifacts.get("preview_video_path") or ""),
+        ]
+        source = next((path for path in candidates if str(path) not in {"", "."} and path.is_file()), None)
+        if source is None:
+            raise FileNotFoundError("No readable video is available for this job thumbnail.")
+
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise RuntimeError("FFmpeg is required to generate video thumbnails.")
+
+        ensure_dir(output_dir)
+        temporary_path = output_dir / f".web_thumbnail.{os.getpid()}.{threading.get_ident()}.jpg"
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-vf",
+                    "thumbnail=30,scale=192:176:force_original_aspect_ratio=increase,crop=192:176",
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "3",
+                    str(temporary_path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            if result.returncode != 0 or not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+                detail = (result.stderr or "").strip().splitlines()
+                raise RuntimeError(detail[-1] if detail else "FFmpeg did not produce a thumbnail.")
+            temporary_path.replace(thumbnail_path)
+            return thumbnail_path
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _runtime_capabilities(settings):
@@ -444,6 +507,21 @@ def create_gvhmr_app(manager, settings, *, submit_to_gmr=None, manage_lifecycle=
         if job is None:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
         return job
+
+    @app.get("/jobs/{job_id}/thumbnail", include_in_schema=False)
+    def get_job_thumbnail(job_id: str):
+        job = manager.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        try:
+            path = _ensure_job_thumbnail(job)
+        except (FileNotFoundError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=604800"},
+        )
 
     @app.get("/batches")
     def list_batches(limit: int = 20):
