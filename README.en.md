@@ -88,6 +88,9 @@ reuses the 50 FPS reference from the final `hmr4d_results.pt` and streams it in
 the background without replacing the motion result. While streaming, **Pause
 SONIC** stops the live reference; the SONIC policy then blends back to its
 built-in idle/default reference instead of holding the final motion frame. The
+SONIC speed slider covers `0.25x` through `1.00x` in `0.05x` steps. It changes
+only the next playback timeline, keeps the output at 50 FPS, and does not send
+anything until **Send to SONIC** is clicked. Each speed uses an isolated cache. The
 CLI remains available:
 
 ```bash

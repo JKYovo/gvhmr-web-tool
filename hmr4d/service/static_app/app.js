@@ -605,7 +605,9 @@ function renderActions(job) {
   const cancelButton = $("cancelBtn");
   const toGmrButton = $("toGmrBtn");
   const toSonicButton = $("toSonicBtn");
-  const sonicSpeedButton = $("sonicSpeedBtn");
+  const sonicSpeedControl = $("sonicSpeedControl");
+  const sonicSpeedRange = $("sonicSpeedRange");
+  const sonicSpeedValue = $("sonicSpeedValue");
   const pauseSonicButton = $("pauseSonicBtn");
   const isSucceeded = job?.status === "succeeded";
   const previewBusy = ["queued", "running"].includes(job?.preview_status);
@@ -638,10 +640,12 @@ function renderActions(job) {
   toSonicButton.hidden = !canUseSonic;
   toSonicButton.disabled = state.activeAction === "to-sonic";
   toSonicButton.textContent = sonicBusy ? "重新发送到 SONIC" : "发送到 SONIC";
-  sonicSpeedButton.hidden = !canUseSonic;
-  sonicSpeedButton.disabled = state.activeAction === "to-sonic";
-  sonicSpeedButton.textContent = `SONIC 速度 ${state.sonicSpeed.toFixed(2).replace(/0$/, "")}×`;
-  sonicSpeedButton.title = "只调整发送给 SONIC 的动作速度；输出控制频率始终为 50 FPS";
+  sonicSpeedControl.hidden = !canUseSonic;
+  sonicSpeedRange.disabled = state.activeAction === "to-sonic";
+  sonicSpeedRange.value = state.sonicSpeed.toFixed(2);
+  sonicSpeedValue.value = `${state.sonicSpeed.toFixed(2)}×`;
+  sonicSpeedValue.textContent = `${state.sonicSpeed.toFixed(2)}×`;
+  sonicSpeedControl.title = "调整下一次发送给 SONIC 的动作速度；输出控制频率始终为 50 FPS";
   pauseSonicButton.hidden = !sonicBusy;
   pauseSonicButton.disabled = state.activeAction === "pause-sonic";
   pauseSonicButton.textContent = state.activeAction === "pause-sonic" ? "正在暂停" : "暂停 SONIC";
@@ -810,12 +814,14 @@ async function toSonicSelected() {
   });
 }
 
-function cycleSonicSpeed() {
-  const speeds = [1.0, 0.75, 0.5];
-  const current = speeds.indexOf(state.sonicSpeed);
-  state.sonicSpeed = speeds[(current + 1) % speeds.length];
-  renderActions(state.selectedJob);
-  showToast(`SONIC 动作速度已设为 ${state.sonicSpeed}×；控制频率仍为 50 FPS。`);
+function updateSonicSpeed(event, notify = false) {
+  const value = Math.round(Number(event.currentTarget.value) * 100) / 100;
+  state.sonicSpeed = Math.max(0.25, Math.min(1.0, value));
+  $("sonicSpeedValue").value = `${state.sonicSpeed.toFixed(2)}×`;
+  $("sonicSpeedValue").textContent = `${state.sonicSpeed.toFixed(2)}×`;
+  if (notify) {
+    showToast(`SONIC 动作速度已设为 ${state.sonicSpeed.toFixed(2)}×；控制频率仍为 50 FPS。`);
+  }
 }
 
 async function pauseSonicSelected() {
@@ -879,7 +885,8 @@ async function boot() {
   $("retryBtn").addEventListener("click", retrySelected);
   $("cancelBtn").addEventListener("click", cancelSelected);
   $("toGmrBtn").addEventListener("click", toGmrSelected);
-  $("sonicSpeedBtn").addEventListener("click", cycleSonicSpeed);
+  $("sonicSpeedRange").addEventListener("input", (event) => updateSonicSpeed(event));
+  $("sonicSpeedRange").addEventListener("change", (event) => updateSonicSpeed(event, true));
   $("toSonicBtn").addEventListener("click", toSonicSelected);
   $("pauseSonicBtn").addEventListener("click", pauseSonicSelected);
   $("previewVideo").addEventListener("loadedmetadata", () => {

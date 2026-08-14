@@ -1934,6 +1934,70 @@ conda run -n gvhmr python tools/sonic/play_reference.py \
 
 ---
 
+## P30：Web SONIC 连续速度滑块
+
+### 基本信息
+
+- 日期：2026-08-14
+- 分支：`main`
+- 状态：CPU 已验证，待 MuJoCo/真机人工确认
+- 上游依据或实验基线：P27 的 `1.0× / 0.75× / 0.5×` 三档循环按钮
+- 范围：Web SONIC 播放速度选择、API 校验、倍率缓存和真机说明
+- 不包含：修改 GVHMR tensor、SONIC 50 Hz 控制频率、尖峰过滤、机器人安全约束或控制策略
+
+### 优化目标
+
+将三档循环按钮改为可直接拖动的速度滑块，允许在真机或 MuJoCo 验证时小步调整动作速度，不必在相差较大的固定档位之间跳转。
+
+### 关键实现
+
+- 任务详情增加 `0.25×～1.00×` 横向滑块，步长 `0.05×`，当前值固定显示两位小数。
+- 拖动只改变下一次发送所用的倍率，不会自动连接或推流；仍需显式点击“发送到 SONIC”。
+- API 同步接受 16 个离散档位，拒绝非有限值、越界值和不在 `0.05×` 网格上的值。
+- 输出仍统一为 50 FPS，通过 SO(3) SLERP 改变动作时间轴，不改写人体结果或预览。
+- 每个倍率继续使用隔离的 NPZ/JSON 缓存；倍率字符串规范化后，已有 `0.5×`、`0.75×` 和 `1.0×` 缓存命名保持兼容。
+- 真机文档改为首次 `0.5×` 或更低，并按 `0.05×` 小步提高。
+
+### 接口、配置与资产变化
+
+- `POST /jobs/{job_id}/to-sonic?speed=<倍率>` 的范围由三档扩展为 `0.25～1.00`，步长 `0.05`；省略参数仍为 `1.0`。
+- 示例新增缓存：`sonic_reference_speed_0_65.npz` 与 `sonic_conversion_speed_0_65.json`。
+- 没有新增依赖或模型资产。
+
+### 验证方法与结果
+
+- `python -m unittest discover -s tests -p 'test_service_web.py' -v`：27/27 通过，包含静态页面滑块范围检查。
+- `python -m unittest tools.sonic.test_sonic -v`：4/4 通过。
+- 服务测试覆盖 `0.65×` API 路由、50 FPS 输出、时长变化、独立缓存首次生成与复用。
+- 当前 cxk 真实 PT 离线转换 `0.65×` 得到 939 帧、50 FPS、18.76 秒，三组数组均为有限值；该检查没有打开 ZMQ publisher。
+- `0.81×`、`0.2×` 和 `1.05×` 均返回明确的 400 错误。
+- `node --check hmr4d/service/static_app/app.js`、Python compile 和 `git diff --check` 通过。
+- 本项没有连接 SONIC、MuJoCo 或真机；动态跟踪效果必须单独人工确认。
+
+### 未完成项和已知风险
+
+- 更慢只降低时间变化率，不能修复 GVHMR 单帧姿态尖峰，也不能保证机器人稳定。
+- 默认值仍为 `1.00×`，首次真机必须按照 Quickstart 主动降低并使用可靠支撑。
+- 当前没有基于 root/关节速度的自动真机安全拦截，结构合法但不可执行的动作仍可能被发送。
+
+### 回退方式
+
+恢复三档按钮及后端 `(0.5, 0.75, 1.0)` 白名单即可；新生成的其他倍率缓存不会影响旧默认 reference。
+
+### 主要涉及文件
+
+- `hmr4d/service/manager.py`
+- `hmr4d/service/static_app/index.html`
+- `hmr4d/service/static_app/app.js`
+- `hmr4d/service/static_app/styles.css`
+- `tests/test_service_web.py`
+- `README.md`
+- `README.en.md`
+- `docs/SONIC_REAL_ROBOT_QUICKSTART.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
 ## 后续优化记录模板
 
 复制以下小节并追加到本文档，不能覆盖历史记录。

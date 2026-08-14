@@ -3,6 +3,7 @@ import shutil
 import threading
 import time
 import json
+import math
 from pathlib import Path
 from queue import Empty, Queue
 
@@ -21,6 +22,9 @@ from hmr4d.service.external_core import ExternalCoreRunner
 
 _PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})%")
 GROUND_CONSTRAINTS = {"none", "flat_y", "human3r"}
+SONIC_SPEED_MIN = 0.25
+SONIC_SPEED_MAX = 1.0
+SONIC_SPEED_STEP = 0.05
 
 
 def _normalize_ground_constraint(value):
@@ -420,12 +424,26 @@ class JobManager:
     def send_to_sonic(self, job_id, *, speed=1.0):
         """Prepare and asynchronously stream a completed job to local SONIC."""
         speed = float(speed)
-        supported_speeds = (0.5, 0.75, 1.0)
-        if speed not in supported_speeds:
+        if not math.isfinite(speed):
+            raise ValueError("SONIC speed must be finite.")
+        normalized_speed = round(speed, 2)
+        step_index = round((normalized_speed - SONIC_SPEED_MIN) / SONIC_SPEED_STEP)
+        on_step = math.isclose(
+            normalized_speed,
+            SONIC_SPEED_MIN + step_index * SONIC_SPEED_STEP,
+            abs_tol=1e-9,
+        )
+        if (
+            not math.isclose(speed, normalized_speed, abs_tol=1e-9)
+            or normalized_speed < SONIC_SPEED_MIN
+            or normalized_speed > SONIC_SPEED_MAX
+            or not on_step
+        ):
             raise ValueError(
-                f"Unsupported SONIC speed {speed:g}; choose one of "
-                + ", ".join(f"{value:g}x" for value in supported_speeds)
+                f"Unsupported SONIC speed {speed:g}; choose {SONIC_SPEED_MIN:g}x to "
+                f"{SONIC_SPEED_MAX:g}x in {SONIC_SPEED_STEP:g}x steps."
             )
+        speed = normalized_speed
         job = self.get_job(job_id)
         if job is None:
             return None
@@ -443,7 +461,7 @@ class JobManager:
         source = output_dir / "hmr4d_results.pt"
         if not source.is_file():
             raise FileNotFoundError(f"Missing inference result at {source}")
-        speed_tag = str(speed).replace(".", "_")
+        speed_tag = f"{speed:.2f}".rstrip("0").rstrip(".").replace(".", "_")
         if speed == 1.0:
             reference_path = output_dir / "sonic_reference.npz"
             metadata_path = output_dir / "sonic_conversion.json"
@@ -458,7 +476,11 @@ class JobManager:
                 cached = json.loads(metadata_path.read_text(encoding="utf-8"))
                 if (
                     cached.get("source_sha256") == source_digest
-                    and float(cached.get("source_fps", 0.0)) == effective_source_fps
+                    and math.isclose(
+                        float(cached.get("source_fps", 0.0)),
+                        effective_source_fps,
+                        abs_tol=1e-9,
+                    )
                 ):
                     metadata = cached
             except (OSError, ValueError, TypeError):

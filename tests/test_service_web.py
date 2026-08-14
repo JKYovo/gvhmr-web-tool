@@ -513,13 +513,28 @@ class ServiceWebTest(unittest.TestCase):
         send.assert_called_once_with("example", speed=1.0)
 
         with patch.object(self.manager, "send_to_sonic", return_value=payload) as send:
-            response = self.client.post("/jobs/example/to-sonic?speed=0.75")
+            response = self.client.post("/jobs/example/to-sonic?speed=0.65")
         self.assertEqual(response.status_code, 200, response.text)
-        send.assert_called_once_with("example", speed=0.75)
+        send.assert_called_once_with("example", speed=0.65)
 
-        invalid = self.client.post("/jobs/example/to-sonic?speed=0.8")
+        invalid = self.client.post("/jobs/example/to-sonic?speed=0.81")
         self.assertEqual(invalid.status_code, 400, invalid.text)
         self.assertIn("Unsupported SONIC speed", invalid.json()["detail"])
+
+        too_slow = self.client.post("/jobs/example/to-sonic?speed=0.2")
+        self.assertEqual(too_slow.status_code, 400, too_slow.text)
+        too_fast = self.client.post("/jobs/example/to-sonic?speed=1.05")
+        self.assertEqual(too_fast.status_code, 400, too_fast.text)
+
+    def test_sonic_speed_slider_exposes_granular_safe_range(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200, response.text)
+        html = response.text
+        self.assertIn('id="sonicSpeedRange"', html)
+        self.assertIn('min="0.25"', html)
+        self.assertIn('max="1"', html)
+        self.assertIn('step="0.05"', html)
+        self.assertNotIn('id="sonicSpeedBtn"', html)
 
     def test_sonic_conversion_is_cached_and_exposed_as_artifacts(self):
         job = self._make_succeeded_job("sonic.mp4")
@@ -581,25 +596,25 @@ class ServiceWebTest(unittest.TestCase):
             return_value=controller,
         ):
             normal = self.manager.send_to_sonic(job["job_id"], speed=1.0)
-            slow = self.manager.send_to_sonic(job["job_id"], speed=0.75)
-            reused = self.manager.send_to_sonic(job["job_id"], speed=0.75)
+            slow = self.manager.send_to_sonic(job["job_id"], speed=0.65)
+            reused = self.manager.send_to_sonic(job["job_id"], speed=0.65)
 
         self.assertEqual(normal["fps"], 50.0)
         self.assertEqual(slow["fps"], 50.0)
         self.assertEqual(normal["speed"], 1.0)
-        self.assertEqual(slow["speed"], 0.75)
+        self.assertEqual(slow["speed"], 0.65)
         self.assertGreater(slow["frames"], normal["frames"])
-        self.assertAlmostEqual(slow["duration_s"] / normal["duration_s"], 4 / 3, places=1)
+        self.assertAlmostEqual(slow["duration_s"] / normal["duration_s"], 1 / 0.65, places=1)
         self.assertFalse(slow["reused"])
         self.assertTrue(reused["reused"])
         self.assertTrue((output_dir / "sonic_reference.npz").is_file())
-        self.assertTrue((output_dir / "sonic_reference_speed_0_75.npz").is_file())
-        self.assertTrue((output_dir / "sonic_conversion_speed_0_75.json").is_file())
+        self.assertTrue((output_dir / "sonic_reference_speed_0_65.npz").is_file())
+        self.assertTrue((output_dir / "sonic_conversion_speed_0_65.json").is_file())
         updated = self.manager.get_job(job["job_id"])
-        self.assertEqual(updated["sonic_speed"], 0.75)
+        self.assertEqual(updated["sonic_speed"], 0.65)
         self.assertEqual(
             Path(updated["artifacts"]["sonic_reference_path"]),
-            output_dir / "sonic_reference_speed_0_75.npz",
+            output_dir / "sonic_reference_speed_0_65.npz",
         )
 
     def test_sonic_pause_stops_live_stream_and_marks_idle_fallback(self):
