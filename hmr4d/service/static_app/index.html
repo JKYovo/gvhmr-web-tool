@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GVHMR Web</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%23111827'/%3E%3Cpath d='M13 19h16v7H20v12h9v7H13V19Zm22 0h7l4 14 4-14h7l-8 26h-6l-8-26Z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="static/styles.css?v=20260814-sonic-speed-slider">
+  <link rel="stylesheet" href="static/styles.css?v=20260814-studio-workspace-v2">
 </head>
 <body>
   <main class="shell">
@@ -38,9 +38,11 @@
           <div class="tab-panel" id="singleModePanel" data-mode-panel="single" role="tabpanel">
             <form id="singleForm" class="form-grid">
               <label class="file-drop">
-                <span class="field-title">输入视频</span>
+                <span class="upload-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" role="img"><path d="M7 18a4 4 0 0 1-.7-7.94A6 6 0 0 1 17.8 8.2 5 5 0 0 1 18 18h-3v-2h3a3 3 0 1 0-.6-5.94l-1.08.22-.12-1.1A4 4 0 0 0 8.27 10l-.12 1.15-1.15-.1A2 2 0 1 0 7 15h3v3H7Z"/><path d="m12 10-3 3h2v6h2v-6h2l-3-3Z"/></svg>
+                </span>
+                <span class="upload-copy"><strong>拖拽视频文件到此处，或点击选择</strong><small>支持 MP4 / MOV / AVI / MKV / WEBM，输入自动规范化为 30 FPS</small></span>
                 <input id="singleFile" type="file" name="file" accept=".mp4,.mov,.avi,.mkv,.webm" required>
-                <small>支持 mp4 / mov / avi / mkv / webm</small>
               </label>
               <div class="form-section">
                 <div class="section-title"><span>推理设置</span><small>通常保持默认即可</small></div>
@@ -53,7 +55,7 @@
                   <div class="ground-options">
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="none"><span>不启用</span><small>保留原始 FootMR root</small></label>
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="flat_y" checked><span>自动平地约束</span><small>默认；整段 root XYZ 接触优化</small></label>
-                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束</span><small>尚未启用</small></label>
+                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束 <em class="feature-tag">新</em></span><small>尚未启用</small></label>
                   </div>
                 </fieldset>
               </div>
@@ -68,9 +70,11 @@
           <div class="tab-panel" id="batchModePanel" data-mode-panel="batch" role="tabpanel" hidden>
             <form id="batchForm" class="form-grid">
               <label class="file-drop">
-                <span class="field-title">输入视频</span>
+                <span class="upload-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" role="img"><path d="M7 18a4 4 0 0 1-.7-7.94A6 6 0 0 1 17.8 8.2 5 5 0 0 1 18 18h-3v-2h3a3 3 0 1 0-.6-5.94l-1.08.22-.12-1.1A4 4 0 0 0 8.27 10l-.12 1.15-1.15-.1A2 2 0 1 0 7 15h3v3H7Z"/><path d="m12 10-3 3h2v6h2v-6h2l-3-3Z"/></svg>
+                </span>
+                <span class="upload-copy"><strong>拖拽多个视频到此处，或点击选择</strong><small>每个视频创建独立任务，单个文件失败不影响其他任务</small></span>
                 <input id="batchFiles" type="file" name="files" accept=".mp4,.mov,.avi,.mkv,.webm" multiple required>
-                <small>每个视频创建独立任务，单个文件失败不会影响其他文件</small>
               </label>
               <div class="form-section">
                 <div class="section-title"><span>统一设置</span><small>应用到本次所有视频</small></div>
@@ -83,7 +87,7 @@
                   <div class="ground-options">
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="none"><span>不启用</span><small>保留原始 FootMR root</small></label>
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="flat_y" checked><span>自动平地约束</span><small>默认；整段 root XYZ 接触优化</small></label>
-                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束</span><small>尚未启用</small></label>
+                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束 <em class="feature-tag">新</em></span><small>尚未启用</small></label>
                   </div>
                 </fieldset>
               </div>
@@ -101,7 +105,7 @@
         <section class="panel task-console">
           <div class="panel-head">
             <div>
-              <h2>任务控制台</h2>
+              <h2>任务队列</h2>
               <p>查看最近任务及处理状态。</p>
             </div>
             <button id="refreshJobs" class="ghost" type="button">刷新</button>
@@ -191,6 +195,6 @@
     </section>
   </main>
 
-  <script src="static/app.js?v=20260814-sonic-speed-slider"></script>
+  <script src="static/app.js?v=20260814-studio-workspace-v2"></script>
 </body>
 </html>

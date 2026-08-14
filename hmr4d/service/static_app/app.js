@@ -212,6 +212,33 @@ function setMode(mode) {
   });
 }
 
+function setupFileDrops() {
+  document.querySelectorAll(".file-drop").forEach((zone) => {
+    const input = zone.querySelector('input[type="file"]');
+    if (!input) return;
+    ["dragenter", "dragover"].forEach((name) => {
+      zone.addEventListener(name, (event) => {
+        event.preventDefault();
+        zone.classList.add("drag-active");
+      });
+    });
+    ["dragleave", "drop"].forEach((name) => {
+      zone.addEventListener(name, (event) => {
+        event.preventDefault();
+        zone.classList.remove("drag-active");
+      });
+    });
+    zone.addEventListener("drop", (event) => {
+      const files = [...(event.dataTransfer?.files || [])];
+      if (!files.length) return;
+      const transfer = new DataTransfer();
+      for (const file of input.multiple ? files : files.slice(0, 1)) transfer.items.add(file);
+      input.files = transfer.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  });
+}
+
 async function submitSingle(event) {
   event.preventDefault();
   if (state.submitting.single) return;
@@ -362,22 +389,24 @@ function renderJobs() {
     return (!query || haystack.includes(query)) && (status === "all" || job.status === status);
   });
 
-  $("jobList").innerHTML = jobs.map((job) => {
+  const cards = jobs.map((job) => {
     const progress = currentProgress(job);
     const percent = normalizedProgress(progress);
-    const secondaryState = progress
-      ? `<span title="${escapeHtml(progress.stage)}">${escapeHtml(progress.stage)} ${percent}%</span>`
-      : `<span>${escapeHtml(formatTime(job.submitted_at))}</span>`;
+    const initial = (fileName(job).trim()[0] || "V").toUpperCase();
     return `
       <article class="job-card ${job.job_id === state.selectedJobId ? "active" : ""}" data-job="${escapeHtml(job.job_id)}" tabindex="0">
-        <div class="job-top">
-          <div class="job-name" title="${escapeHtml(fileName(job))}">${escapeHtml(fileName(job))}</div>
-          ${statusPill(job.status)}
+        <div class="job-thumb" aria-hidden="true"><span>${escapeHtml(initial)}</span></div>
+        <div class="job-body">
+          <div class="job-top">
+            <div class="job-name" title="${escapeHtml(fileName(job))}">${escapeHtml(fileName(job))}</div>
+            ${statusPill(job.status)}
+          </div>
+          <div class="job-meta"><span>${escapeHtml(job.job_id)}</span><time>${escapeHtml(formatTime(job.submitted_at))}</time></div>
+          ${progress ? `<div class="job-progress-row"><div class="job-progress" role="progressbar" aria-label="${escapeHtml(progress.stage)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div><strong>${percent}%</strong></div>` : ""}
         </div>
-        <div class="job-meta"><span>${escapeHtml(job.job_id)}</span>${secondaryState}</div>
-        ${progress ? `<div class="job-progress" role="progressbar" aria-label="${escapeHtml(progress.stage)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>` : ""}
       </article>`;
-  }).join("") || `<div class="job-empty">${state.jobs.length ? "没有符合筛选条件的任务" : "暂无任务"}</div>`;
+  }).join("");
+  $("jobList").innerHTML = cards || `<div class="job-empty">${state.jobs.length ? "没有符合筛选条件的任务" : "暂无任务"}</div>`;
 
   document.querySelectorAll(".job-card[data-job]").forEach((card) => {
     card.addEventListener("click", () => selectJob(card.dataset.job));
@@ -388,10 +417,10 @@ function renderJobs() {
       }
     });
   });
-  if (window.matchMedia("(min-width: 981px)").matches) {
+  if (window.matchMedia("(min-width: 821px) and (min-height: 761px)").matches) {
     requestAnimationFrame(() => {
       const activeCard = $("jobList").querySelector(".job-card.active");
-      if (activeCard) $("jobList").scrollTop = Math.max(0, activeCard.offsetTop - $("jobList").offsetTop - 6);
+      if (activeCard) activeCard.scrollIntoView({ block: "nearest" });
     });
   }
 }
@@ -679,7 +708,7 @@ function renderJobDetail(job) {
       || job.ground_constraint_error
       || "-";
     $("detailHint").textContent = `${fileName(job)} · ${job.job_id}`;
-    $("jobMetrics").innerHTML = [
+    const metrics = [
       metric("状态", statusLabel(job.status)),
       metric("视频", fileName(job)),
       metric("任务 ID", job.job_id),
@@ -690,8 +719,9 @@ function renderJobDetail(job) {
         human3r: "Human3R",
       }[job.ground_constraint || "none"] || job.ground_constraint),
       metric("焦距 f_mm", job.f_mm ?? "自动"),
-      metric("错误", error),
-    ].join("");
+    ];
+    if (error !== "-") metrics.push(metric("错误", error));
+    $("jobMetrics").innerHTML = metrics.join("");
     $("logs").textContent = (job.logs || []).join("\n") || "暂无日志";
     $("jobJson").textContent = JSON.stringify(job, null, 2);
   }
@@ -875,6 +905,7 @@ async function copyText(value) {
 
 async function boot() {
   setupDetailPopovers();
+  setupFileDrops();
   $("singleForm").addEventListener("submit", submitSingle);
   $("batchForm").addEventListener("submit", submitBatch);
   $("refreshJobs").addEventListener("click", () => refreshJobs());
