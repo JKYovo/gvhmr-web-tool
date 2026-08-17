@@ -388,6 +388,7 @@ def create_gvhmr_app(manager, settings, *, submit_to_gmr=None, manage_lifecycle=
     @app.get("/api/capabilities")
     def capabilities():
         runtime = _runtime_capabilities(settings)
+        simulation = manager.simulation.status()
         return {
             "service": "gvhmr-web",
             "api_version": 1,
@@ -407,8 +408,32 @@ def create_gvhmr_app(manager, settings, *, submit_to_gmr=None, manage_lifecycle=
             },
             "gmr_bridge_available": submit_to_gmr is not None,
             "sonic_bridge_available": True,
+            "simulation": simulation,
             "runtime": runtime,
         }
+
+    @app.get("/api/simulation/status")
+    def simulation_status():
+        return manager.simulation.status()
+
+    @app.post("/api/simulation/start")
+    def start_simulation():
+        try:
+            # A Web-owned real-robot publisher must be stopped before any
+            # simulation process is allowed to start.  SimulationManager then
+            # independently rejects both legacy and isolated robot tunnels.
+            manager.pause_active_sonic(target="real")
+            return manager.simulation.start()
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/simulation/stop")
+    def stop_simulation():
+        try:
+            manager.pause_active_sonic(target="simulation")
+            return manager.simulation.stop()
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/fs/pick-directory")
     def pick_directory(initial: str | None = None):
@@ -605,9 +630,38 @@ def create_gvhmr_app(manager, settings, *, submit_to_gmr=None, manage_lifecycle=
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/jobs/{job_id}/to-sonic")
-    def submit_job_to_sonic(job_id: str, speed: float = 1.0):
+    def submit_job_to_sonic(
+        job_id: str,
+        speed: float = 1.0,
+        confirm_real: bool = False,
+    ):
+        if not confirm_real:
+            raise HTTPException(
+                status_code=400,
+                detail="发送到真机必须显式确认；Web 不会启动真机控制器。",
+            )
         try:
-            result = manager.send_to_sonic(job_id, speed=speed)
+            result = manager.send_to_sonic(
+                job_id,
+                speed=speed,
+                target="real",
+                confirm_real=confirm_real,
+            )
+            if result is None:
+                raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+            return result
+        except (RuntimeError, FileNotFoundError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/jobs/{job_id}/to-simulation")
+    def submit_job_to_simulation(job_id: str, speed: float = 1.0):
+        try:
+            result = manager.send_to_sonic(
+                job_id,
+                speed=speed,
+                target="simulation",
+                confirm_real=False,
+            )
             if result is None:
                 raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
             return result

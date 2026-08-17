@@ -69,6 +69,10 @@ class ServiceSettings:
     sync_assets_on_boot: bool
     core_root: Path | None = None
     core_python: str | None = None
+    simulation_workspace: Path = Path("/home/user-kevien/bxi_rl_controller_ros2_example")
+    simulation_bxi_setup: Path = Path("/home/user-kevien/bxi_ros2_pkg/setup.bash")
+    simulation_mujoco_library_dir: Path = Path("/home/user-kevien/.mujoco/mujoco210/bin")
+    simulation_ros_domain_id: int = 73
 
     @classmethod
     def from_env(cls):
@@ -90,6 +94,27 @@ class ServiceSettings:
         core_root_value = os.environ.get("GVHMR_CORE_ROOT", "").strip()
         core_root = Path(core_root_value).expanduser().resolve() if core_root_value else None
         core_python = os.environ.get("GVHMR_CORE_PYTHON", "").strip() or sys.executable
+        simulation_workspace = Path(
+            os.environ.get(
+                "GVHMR_SIMULATION_WORKSPACE",
+                "/home/user-kevien/bxi_rl_controller_ros2_example",
+            )
+        ).expanduser().resolve()
+        simulation_bxi_setup = Path(
+            os.environ.get(
+                "GVHMR_SIMULATION_BXI_SETUP",
+                "/home/user-kevien/bxi_ros2_pkg/setup.bash",
+            )
+        ).expanduser().resolve()
+        simulation_mujoco_library_dir = Path(
+            os.environ.get(
+                "GVHMR_SIMULATION_MUJOCO_LIBRARY_DIR",
+                "/home/user-kevien/.mujoco/mujoco210/bin",
+            )
+        ).expanduser().resolve()
+        simulation_ros_domain_id = int(
+            os.environ.get("GVHMR_SIMULATION_ROS_DOMAIN_ID", "73")
+        )
         return cls(
             checkpoint_root=checkpoint_root,
             output_root=output_root,
@@ -100,6 +125,10 @@ class ServiceSettings:
             sync_assets_on_boot=sync_assets_on_boot,
             core_root=core_root,
             core_python=core_python,
+            simulation_workspace=simulation_workspace,
+            simulation_bxi_setup=simulation_bxi_setup,
+            simulation_mujoco_library_dir=simulation_mujoco_library_dir,
+            simulation_ros_domain_id=simulation_ros_domain_id,
         )
 
     def ensure_runtime_dirs(self):

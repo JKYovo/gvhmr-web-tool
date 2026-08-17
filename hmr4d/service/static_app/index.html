@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GVHMR Web</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%23111827'/%3E%3Cpath d='M13 19h16v7H20v12h9v7H13V19Zm22 0h7l4 14 4-14h7l-8 26h-6l-8-26Z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="static/styles.css?v=20260814-video-thumbnails">
+  <link rel="stylesheet" href="static/styles.css?v=20260817-safe-simulation">
 </head>
 <body>
   <main class="shell">
@@ -166,7 +166,13 @@
                 <input id="sonicSpeedRange" type="range" min="0.25" max="1" step="0.05" value="1" aria-label="SONIC 动作速度">
                 <output id="sonicSpeedValue" for="sonicSpeedRange">1.00×</output>
               </div>
-              <button id="toSonicBtn" type="button" hidden>发送到 SONIC</button>
+              <div class="simulation-control" id="simulationControl" hidden>
+                <span id="simulationStatus">仿真未启动</span>
+                <button id="startSimulationBtn" type="button">启动仿真</button>
+                <button id="stopSimulationBtn" type="button" hidden>关闭仿真</button>
+              </div>
+              <button id="toSimulationBtn" type="button" hidden>发送到仿真</button>
+              <button id="toSonicBtn" class="danger-action" type="button" hidden>发送到真机</button>
               <button id="pauseSonicBtn" type="button" hidden>暂停 SONIC</button>
             </div>
             <div class="detail-action-hint" id="detailActionHint">选择任务后显示下一步操作。</div>
@@ -195,6 +201,6 @@
     </section>
   </main>
 
-  <script src="static/app.js?v=20260814-video-thumbnails"></script>
+  <script src="static/app.js?v=20260817-sonic-queue-freeze"></script>
 </body>
 </html>

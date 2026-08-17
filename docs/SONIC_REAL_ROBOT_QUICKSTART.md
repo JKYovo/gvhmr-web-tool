@@ -9,7 +9,7 @@ GVHMR Web 已经内置 SMPL-X22 到 SONIC reference 的转换和 50 FPS ZMQ 推�
 ```text
 GVHMR Web 最终 hmr4d_results.pt
   → 本机 Web 转换为 50 FPS SONIC reference
-  → 本机 tcp://127.0.0.1:5557
+  → 本机 tcp://127.0.0.1:5559
   → SSH reverse tunnel
   → 机器人 127.0.0.1:5558
   → raindrop overlay 的 SONIC policy
@@ -20,7 +20,19 @@ GVHMR Web 最终 hmr4d_results.pt
 
 本流程不覆盖同事使用的官方 PICO/5557 环境。机器人上的改动位于独立 overlay `/home/bxi/raindrop`，不要在 `/home/bxi/bxi_ws/bxi_rl_controller_ros2_example` 中修改 SONIC plugin、应用 stash 或重新构建。
 
-Web 使用 ZMQ PUB，协议没有 ACK。页面显示“推流完成”只代表 Web 发完，不能单独证明机器人收到并执行了每一帧。
+Web 使用兼容 SUB 的 ZMQ XPUB 检查 `smpl_ref` 订阅生命周期，但协议没有逐帧执行 ACK。页面显示“推流完成”只代表 Web 发完，不能单独证明机器人收到并执行了每一帧。
+
+> 模式联锁必须同时更新真机接收端。新版 SONIC policy 只在进入 `sonic_teleop` 时连接 5558，离开时立即关闭 SUB、清空 live reference 和接收队列。仅更新 Web 而仍使用旧 `raindrop` overlay，不能修复“切到 normal 后再次进入会续播”的风险，禁止据此上真机。
+
+上真机前由现场人员在 `/home/bxi/raindrop` 源码中确认以下两个文件都包含接收端生命周期调用：
+
+```bash
+grep -n 'activate_live_receiver\|deactivate_live_receiver' \
+  /home/bxi/raindrop/src/bxi_example_py_elf3/mods/com.bxi.sonic/policy.py \
+  /home/bxi/raindrop/src/bxi_example_py_elf3/mods/com.bxi.sonic/state.py
+```
+
+必须能看到 `state.on_enter → activate_live_receiver()`、`state.on_exit → deactivate_live_receiver()`。若没有，由现场人员将已验证版本的这两个文件同步进 overlay，执行 overlay 原有的 `colcon build --packages-select bxi_example_py_elf3` 构建流程并重启真机控制器；Web 不会 SSH、部署或重启真机。
 
 ## 1. 真机上电前的必要条件
 
@@ -66,11 +78,11 @@ conda activate gvhmr
 bash start_web_source.sh
 ```
 
-打开 <http://127.0.0.1:7860>，确认要测试的任务已成功，且 MuJoCo 人工检查使用的正是该任务最终发布的 `hmr4d_results.pt`。此时不要点击“发送到 SONIC”。
+打开 <http://127.0.0.1:7860>，确认要测试的任务已成功，且 MuJoCo 人工检查使用的正是该任务最终发布的 `hmr4d_results.pt`。此时不要点击“发送到真机”。
 
 Web 已经运行时不要重复启动第二个实例。
 
-## 4. 建立本机 5557 → 机器人 5558 隔离隧道
+## 4. 建立本机 5559 → 机器人 5558 隔离隧道
 
 在本机另开终端，建立 SSH reverse tunnel 并保持终端运行：
 
@@ -79,11 +91,12 @@ ssh -NT \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=2 \
   -o ServerAliveCountMax=3 \
-  -R 127.0.0.1:5558:127.0.0.1:5557 \
+  -R 127.0.0.1:5558:127.0.0.1:5559 \
   bxi@192.168.88.172
 ```
 
-密码验证后终端持续空白是正常现象。不要把远端监听改成 `0.0.0.0`，也不要建立旧的远端 5557 隧道。
+密码验证后终端持续空白是正常现象。不要把远端监听改成 `0.0.0.0`。旧的
+`-R 127.0.0.1:5558:127.0.0.1:5557` 会与仿真端口混用，Web 会将其视为危险链路并拒绝仿真和真机发送。
 
 在机器人端检查：
 
@@ -187,7 +200,7 @@ timeout 5 env ROS2CLI_NO_DAEMON=1 \
 ss -ltnp | grep ':5558 '
 ```
 
-推流前只看到 `LISTEN` 是正常的。Kimodo 会长期占用本机 5557，但 GVHMR Web 仅在点击“发送到 SONIC”后的播放期间绑定 5557；因此不能照搬 Kimodo 流程，在推流前强制要求 `ESTAB`。
+推流前只看到 `LISTEN` 是正常的。GVHMR Web 仅在点击“发送到真机”后的播放期间绑定本机 5559；本机 5557 专用于 MuJoCo 仿真。因此不能照搬 Kimodo 流程，在推流前强制要求 `ESTAB`。
 
 - 5558 没有 `LISTEN`：检查 SSH 隧道终端。
 - 控制器环境不是 `SONIC_REFERENCE_MODE=kimodo`：当前可能仍是官方 PICO/5557 链路，不要发送 Web 动作。
@@ -200,11 +213,13 @@ ss -ltnp | grep ':5558 '
 3. 在 Web 中选择已通过 MuJoCo 的短动作。
 4. 首次测试先将“SONIC 速度”滑块设为 `0.5×` 或更低；确认稳定后再按 `0.05×` 小步提高，不能直接跳到 `1.0×`。倍率只调整动作时间轴，所有档位都保持 50 FPS 控制输入；拖动滑块本身不会发送动作。
 5. 在机器人只读终端预先运行 `watch -n 0.1 "ss -tnp | grep ':5558 ' || true"`。
-6. 点击“发送到 SONIC”。播放期间应看到 5558 `ESTAB`，同时观察最初 1～2 秒的关节方向、限位和跟踪。
+6. 确认 Web 仿真状态是“仿真未启动”，再点击“发送到真机”并完成二次确认。播放期间应看到 5558 `ESTAB`，同时观察最初 1～2 秒的关节方向、限位和跟踪。
 7. 如果始终没有 `ESTAB`，立即点击“暂停 SONIC”，检查隧道、overlay 和模式，不要反复点击发送。
 8. 任何超限、抽动、跟踪失稳、转向错误或支撑异常，立即点击“暂停 SONIC”；来不及时直接使用实体急停。
 
 “暂停 SONIC”会停止 Web live reference。SONIC policy 在 reference 超时后平滑回到自身 idle/default reference；它不等同于实体急停，也不会切断扭矩。
+
+播放中切到 `normal`、`pd_brake`、`zero_torque` 或离开 `sonic_teleop` 时，新版接收端会立即退订，Web 将当前会话标记为安全终止。再次进入 `sonic_teleop` 后旧动作不会继续，也不能自动恢复；必须先确认 idle 稳定，再人工重新点击“发送到真机”。留在非 SONIC 模式时点击发送必须零帧失败并提示“只有处于 sonic_teleop 模式时才能开始推流”。
 
 ## 10. 正常停止顺序
 
@@ -222,8 +237,8 @@ ss -ltnp | grep ':5558 '
 依次检查：
 
 ```bash
-# 本机 Web 播放时应监听 5557
-ss -ltnp | grep ':5557 '
+# 本机 Web 真机播放时应监听 5559
+ss -ltnp | grep ':5559 '
 
 # 机器人端应同时有 5558 LISTEN 和 ESTAB
 ss -ltnp | grep ':5558 '

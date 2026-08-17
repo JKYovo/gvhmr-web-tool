@@ -12,6 +12,8 @@ const state = {
   submitting: { single: false, batch: false },
   activeAction: null,
   sonicSpeed: 1.0,
+  sonicPollingJobId: null,
+  simulation: null,
   thumbnailObserver: null,
 };
 
@@ -164,7 +166,7 @@ function updateSubmitState(mode) {
   }
 }
 
-function renderCapabilities() {
+function renderCapabilities({ initializeForms = false } = {}) {
   const cap = state.capabilities;
   const runtime = cap?.runtime || {};
   const badges = [
@@ -177,6 +179,10 @@ function renderCapabilities() {
       : `<span class="badge warning" title="${escapeHtml((runtime.missing_assets || []).join("、"))}">模型缺失</span>`,
   ];
   if (cap?.gmr_bridge_available) badges.push(`<span class="badge ready">GMR 可用</span>`);
+  const simulation = state.simulation || cap?.simulation;
+  if (simulation?.state === "ready") badges.push(`<span class="badge ready">仿真就绪</span>`);
+  else if (["starting", "stopping"].includes(simulation?.state)) badges.push(`<span class="badge warning">仿真切换中</span>`);
+  else if (simulation?.state === "error") badges.push(`<span class="badge error" title="${escapeHtml(simulation.error || "仿真异常")}">仿真异常</span>`);
   $("capabilityBadges").innerHTML = badges.join("");
   const groundConfig = cap?.ground_constraints || {};
   const groundOptions = new Map((groundConfig.options || []).map((item) => [item.value, item]));
@@ -184,12 +190,14 @@ function renderCapabilities() {
     const option = groundOptions.get(input.value);
     if (option) input.disabled = !option.enabled;
   });
-  const groundDefault = groundConfig.default || "none";
-  document.querySelectorAll("#singleForm, #batchForm").forEach((form) => {
-    const selected = form.querySelector(`input[name="ground_constraint"][value="${groundDefault}"]:not(:disabled)`)
-      || form.querySelector('input[name="ground_constraint"][value="none"]');
-    if (selected) selected.checked = true;
-  });
+  if (initializeForms) {
+    const groundDefault = groundConfig.default || "none";
+    document.querySelectorAll("#singleForm, #batchForm").forEach((form) => {
+      const selected = form.querySelector(`input[name="ground_constraint"][value="${groundDefault}"]:not(:disabled)`)
+        || form.querySelector('input[name="ground_constraint"][value="none"]');
+      if (selected) selected.checked = true;
+    });
+  }
   updateSubmitState("single");
   updateSubmitState("batch");
 
@@ -329,10 +337,22 @@ async function submitBatch(event) {
   }
 }
 
-function jobNeedsPolling(job) {
+function jobProcessingNeedsPolling(job) {
   return ["queued", "running"].includes(job?.status)
-    || ["queued", "running"].includes(job?.preview_status)
-    || ["preparing", "streaming"].includes(job?.sonic_status);
+    || ["queued", "running"].includes(job?.preview_status);
+}
+
+function sonicPlaybackJobId() {
+  if (state.sonicPollingJobId) return state.sonicPollingJobId;
+  return state.jobs.find((job) => ["preparing", "streaming"].includes(job?.sonic_status))?.job_id || null;
+}
+
+function simulationNeedsPolling() {
+  const simulation = state.simulation || {};
+  return ["starting", "ready", "stopping"].includes(simulation.state)
+    || Boolean(simulation.legacy_real_tunnel_active)
+    || Boolean(simulation.isolated_real_tunnel_active)
+    || Boolean(simulation.external_simulation_processes?.length);
 }
 
 function currentProgress(job) {
@@ -357,10 +377,19 @@ function normalizedProgress(progress) {
 }
 
 function ensurePolling() {
-  if (state.polling || !state.jobs.some(jobNeedsPolling)) return;
+  if (
+    state.polling
+    || (!sonicPlaybackJobId() && !state.jobs.some(jobProcessingNeedsPolling) && !simulationNeedsPolling())
+  ) return;
   state.polling = setInterval(async () => {
     try {
-      await refreshJobs({ silent: true });
+      if (simulationNeedsPolling()) await refreshSimulationStatus({ silent: true });
+      const playbackJobId = sonicPlaybackJobId();
+      if (playbackJobId) {
+        await refreshSonicPlaybackJob(playbackJobId);
+      } else if (state.jobs.some(jobProcessingNeedsPolling)) {
+        await refreshJobs({ silent: true });
+      }
     } catch (_) {
       stopPolling();
     }
@@ -373,8 +402,33 @@ function stopPolling() {
 }
 
 function syncPolling() {
-  if (state.jobs.some(jobNeedsPolling)) ensurePolling();
+  if (sonicPlaybackJobId() || state.jobs.some(jobProcessingNeedsPolling) || simulationNeedsPolling()) ensurePolling();
   else stopPolling();
+}
+
+async function refreshSimulationStatus({ silent = false } = {}) {
+  try {
+    state.simulation = await request("api/simulation/status");
+    if (state.capabilities) state.capabilities.simulation = state.simulation;
+    renderCapabilities();
+    renderActions(state.selectedJob);
+    return state.simulation;
+  } catch (error) {
+    if (!silent) showToast(`读取仿真状态失败：${error.message}`, true);
+    return null;
+  }
+}
+
+async function refreshSonicPlaybackJob(jobId) {
+  const job = await request(`jobs/${jobId}`);
+  const active = ["preparing", "streaming"].includes(job?.sonic_status);
+  state.sonicPollingJobId = active ? jobId : null;
+  if (state.selectedJobId === jobId) {
+    state.selectedJob = job;
+    renderJobDetail(job);
+  }
+  if (!active) await refreshJobs({ silent: true });
+  return active;
 }
 
 async function refreshJobs({ silent = false } = {}) {
@@ -385,6 +439,9 @@ async function refreshJobs({ silent = false } = {}) {
   try {
     const jobs = await request("jobs?limit=80");
     state.jobs = jobs;
+    state.sonicPollingJobId = jobs.find(
+      (job) => ["preparing", "streaming"].includes(job?.sonic_status),
+    )?.job_id || null;
     if (!state.selectedJobId && jobs.length) state.selectedJobId = jobs[0].job_id;
 
     let selected = jobs.find((job) => job.job_id === state.selectedJobId) || null;
@@ -631,11 +688,11 @@ function actionHint(job) {
     return { text: `动作结果未受影响；预览失败：${job.preview_error_summary || "请查看日志"}`, kind: "error" };
   }
   if (job.sonic_status === "preparing") {
-    return { text: "正在准备本地 SONIC 推流。", kind: "warning" };
+    return { text: `正在准备发送到${job.sonic_target === "real" ? "真机" : "仿真"}。`, kind: "warning" };
   }
   if (job.sonic_status === "streaming") {
     return {
-      text: `正在推流到 SONIC：${job.sonic_frame || 0} / ${job.sonic_frames || 0} 帧。`,
+      text: `正在发送到${job.sonic_target === "real" ? "真机" : "仿真"}：${job.sonic_frame || 0} / ${job.sonic_frames || 0} 帧。`,
       kind: "warning",
     };
   }
@@ -662,6 +719,11 @@ function renderActions(job) {
   const cancelButton = $("cancelBtn");
   const toGmrButton = $("toGmrBtn");
   const toSonicButton = $("toSonicBtn");
+  const toSimulationButton = $("toSimulationBtn");
+  const simulationControl = $("simulationControl");
+  const simulationStatus = $("simulationStatus");
+  const startSimulationButton = $("startSimulationBtn");
+  const stopSimulationButton = $("stopSimulationBtn");
   const sonicSpeedControl = $("sonicSpeedControl");
   const sonicSpeedRange = $("sonicSpeedRange");
   const sonicSpeedValue = $("sonicSpeedValue");
@@ -694,18 +756,72 @@ function renderActions(job) {
     && isSucceeded
     && hasArtifact(job, "hmr4d_results");
   const sonicBusy = ["preparing", "streaming"].includes(job?.sonic_status);
+  const simulation = state.simulation || state.capabilities?.simulation || {};
+  const simulationState = simulation.state || "unavailable";
+  const simulationReady = simulationState === "ready";
+  const simulationStopped = simulationState === "stopped";
+  const simulationSwitching = ["starting", "stopping"].includes(simulationState);
+  const simulationLabels = {
+    unavailable: `本机仿真不可用：${simulation.availability_error || "请检查配置"}`,
+    stopped: "仿真未启动 · Domain 73 · 本机 5557",
+    starting: "正在启动 MuJoCo 与 SONIC…",
+    ready: "仿真已就绪 · Domain 73 · 本机 5557",
+    stopping: "正在安全关闭仿真…",
+    error: `仿真异常：${simulation.error || "请查看日志"}`,
+  };
+  const simulationWarning = Array.isArray(simulation.warnings) ? simulation.warnings[0] : "";
+  const externalSimulationCount = simulation.external_simulation_processes?.length || 0;
+  let simulationBlockReason = "";
+  if (simulation.legacy_real_tunnel_active) {
+    simulationBlockReason = "检测到旧 5557 真机隧道，请先关闭";
+  } else if (simulation.isolated_real_tunnel_active) {
+    simulationBlockReason = "检测到 5559 真机隧道，请先关闭";
+  } else if (externalSimulationCount) {
+    simulationBlockReason = `检测到 ${externalSimulationCount} 个 Web 外仿真进程，请先关闭`;
+  }
+  simulationControl.hidden = !simulation.available;
+  simulationControl.classList.toggle("has-warning", Boolean(simulationWarning || simulationBlockReason));
+  simulationStatus.textContent = (simulationLabels[simulationState] || simulationState)
+    + (simulationWarning ? " · 非实时调度" : "")
+    + (simulationBlockReason ? ` · ${simulationBlockReason}` : "");
+  simulationStatus.title = simulation.availability_error
+    || simulationBlockReason
+    || simulationWarning
+    || "仿真与真机链路使用不同端口，并由后端强制互斥";
+  startSimulationButton.hidden = simulationReady || simulationState === "starting";
+  startSimulationButton.disabled = Boolean(state.activeAction)
+    || simulationSwitching
+    || simulation.legacy_real_tunnel_active
+    || simulation.isolated_real_tunnel_active
+    || Boolean(simulation.external_simulation_processes?.length);
+  startSimulationButton.title = simulationBlockReason
+    || (simulationSwitching ? "仿真状态正在切换，请稍候" : "仅启动本机 MuJoCo/SONIC 仿真");
+  stopSimulationButton.hidden = simulationStopped || simulationState === "unavailable";
+  stopSimulationButton.disabled = Boolean(state.activeAction) || simulationState === "stopping";
+
+  toSimulationButton.hidden = !canUseSonic;
+  toSimulationButton.disabled = state.activeAction === "to-simulation" || !simulationReady || sonicBusy;
+  toSimulationButton.textContent = sonicBusy && job?.sonic_target === "simulation" ? "重新发送到仿真" : "发送到仿真";
   toSonicButton.hidden = !canUseSonic;
-  toSonicButton.disabled = state.activeAction === "to-sonic";
-  toSonicButton.textContent = sonicBusy ? "重新发送到 SONIC" : "发送到 SONIC";
+  toSonicButton.disabled = state.activeAction === "to-sonic"
+    || !simulationStopped
+    || !simulation.isolated_real_tunnel_active
+    || sonicBusy;
+  toSonicButton.textContent = sonicBusy && job?.sonic_target === "real" ? "正在发送到真机" : "发送到真机";
+  toSonicButton.title = simulation.isolated_real_tunnel_active
+    ? "只向隔离的本机 5559 端口发送；Web 不会启动真机"
+    : "需先按真机 Quickstart 手工启动机器人并建立 5559→机器人5558 隔离隧道";
   sonicSpeedControl.hidden = !canUseSonic;
-  sonicSpeedRange.disabled = state.activeAction === "to-sonic";
+  sonicSpeedRange.disabled = ["to-sonic", "to-simulation"].includes(state.activeAction);
   sonicSpeedRange.value = state.sonicSpeed.toFixed(2);
   sonicSpeedValue.value = `${state.sonicSpeed.toFixed(2)}×`;
   sonicSpeedValue.textContent = `${state.sonicSpeed.toFixed(2)}×`;
   sonicSpeedControl.title = "调整下一次发送给 SONIC 的动作速度；输出控制频率始终为 50 FPS";
   pauseSonicButton.hidden = !sonicBusy;
   pauseSonicButton.disabled = state.activeAction === "pause-sonic";
-  pauseSonicButton.textContent = state.activeAction === "pause-sonic" ? "正在暂停" : "暂停 SONIC";
+  pauseSonicButton.textContent = state.activeAction === "pause-sonic"
+    ? "正在暂停"
+    : `暂停${job?.sonic_target === "real" ? "真机" : "仿真"}动作`;
 }
 
 function renderJobProgress(job) {
@@ -853,21 +969,73 @@ async function toGmrSelected() {
 
 async function toSonicSelected() {
   if (!state.selectedJobId) return showToast("请先选择任务。", true);
+  const confirmed = window.confirm(
+    "确认发送到真机？\n\nWeb 不会启动真机，也不能替代实体急停。请确认：仿真已关闭、机器人由现场人员手工进入 SONIC、实体急停就绪，并已建立 5559→机器人5558 隔离隧道。",
+  );
+  if (!confirmed) return;
   await runAction("to-sonic", async () => {
     try {
       const result = await request(
-        `jobs/${state.selectedJobId}/to-sonic?speed=${encodeURIComponent(state.sonicSpeed)}`,
+        `jobs/${state.selectedJobId}/to-sonic?speed=${encodeURIComponent(state.sonicSpeed)}&confirm_real=true`,
         { method: "POST" },
       );
       const duration = Number(result.duration_s || 0).toFixed(2);
       showToast(
-        `已开始 SONIC 推流：${result.speed}× / ${result.frames} 帧 / ${duration} 秒` +
+        `已开始向真机发送：${result.speed}× / ${result.frames} 帧 / ${duration} 秒` +
         `${result.reused ? "（复用已转换数据）" : ""}`,
       );
-      await refreshJobs();
+      state.sonicPollingJobId = result.job_id;
+      await refreshSonicPlaybackJob(result.job_id);
       ensurePolling();
     } catch (error) {
-      showToast(`SONIC 推流失败：${error.message}`, true);
+      showToast(`真机发送被拒绝：${error.message}`, true);
+    }
+  });
+}
+
+async function toSimulationSelected() {
+  if (!state.selectedJobId) return showToast("请先选择任务。", true);
+  await runAction("to-simulation", async () => {
+    try {
+      const result = await request(
+        `jobs/${state.selectedJobId}/to-simulation?speed=${encodeURIComponent(state.sonicSpeed)}`,
+        { method: "POST" },
+      );
+      const duration = Number(result.duration_s || 0).toFixed(2);
+      showToast(`已开始向仿真发送：${result.speed}× / ${result.frames} 帧 / ${duration} 秒`);
+      state.sonicPollingJobId = result.job_id;
+      await refreshSonicPlaybackJob(result.job_id);
+      ensurePolling();
+    } catch (error) {
+      showToast(`发送到仿真失败：${error.message}`, true);
+    }
+  });
+}
+
+async function startSimulation() {
+  if (!window.confirm("只启动本机 MuJoCo 仿真和本机 ELF3 控制器，不会连接或启动真机。是否继续？")) return;
+  await runAction("start-simulation", async () => {
+    try {
+      state.simulation = await request("api/simulation/start", { method: "POST" });
+      showToast("正在按 MuJoCo → ELF3 控制器 → SONIC 的顺序启动仿真。");
+      renderActions(state.selectedJob);
+      ensurePolling();
+    } catch (error) {
+      showToast(`启动仿真失败：${error.message}`, true);
+      await refreshSimulationStatus({ silent: true });
+    }
+  });
+}
+
+async function stopSimulation() {
+  await runAction("stop-simulation", async () => {
+    try {
+      state.simulation = await request("api/simulation/stop", { method: "POST" });
+      showToast("正在先停止动作并回到 normal，再关闭控制器和 MuJoCo。");
+      renderActions(state.selectedJob);
+      ensurePolling();
+    } catch (error) {
+      showToast(`关闭仿真失败：${error.message}`, true);
     }
   });
 }
@@ -888,6 +1056,7 @@ async function pauseSonicSelected() {
     try {
       await request(`jobs/${state.selectedJobId}/sonic/pause`, { method: "POST" });
       showToast("SONIC 已暂停，正在平滑回到默认姿态。");
+      state.sonicPollingJobId = null;
       await refreshJobs();
     } catch (error) {
       showToast(`暂停 SONIC 失败：${error.message}`, true);
@@ -946,6 +1115,9 @@ async function boot() {
   $("toGmrBtn").addEventListener("click", toGmrSelected);
   $("sonicSpeedRange").addEventListener("input", (event) => updateSonicSpeed(event));
   $("sonicSpeedRange").addEventListener("change", (event) => updateSonicSpeed(event, true));
+  $("startSimulationBtn").addEventListener("click", startSimulation);
+  $("stopSimulationBtn").addEventListener("click", stopSimulation);
+  $("toSimulationBtn").addEventListener("click", toSimulationSelected);
   $("toSonicBtn").addEventListener("click", toSonicSelected);
   $("pauseSonicBtn").addEventListener("click", pauseSonicSelected);
   $("previewVideo").addEventListener("loadedmetadata", () => {
@@ -972,7 +1144,8 @@ async function boot() {
 
   try {
     state.capabilities = await request("api/capabilities");
-    renderCapabilities();
+    state.simulation = state.capabilities.simulation || null;
+    renderCapabilities({ initializeForms: true });
   } catch (error) {
     $("capabilityBadges").innerHTML = `<span class="badge error">环境检查失败</span>`;
     updateSubmitState("single");

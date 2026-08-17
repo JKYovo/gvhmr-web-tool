@@ -13,11 +13,13 @@
 - 静态相机和可选焦距 `f_mm`
 - FootMR COCO23 脚踝残差细化，以及隔离的预处理缓存
 - 可选 Contact Global V1.1 自动平地约束：按 toe/heel 接触连续置信度整段优化 root XYZ
+- 默认严格检查 global/incam 同步出现的孤立极端朝向跳变，只重分配短窗口 root 转速
 - Human3R 场景约束代码已纳入实验工具，但 Web 中暂不启用
 - SQLite 任务持久化、状态筛选、取消和失败重试
 - 长视频整段精确 local attention、内存受控共享裁剪和极端 OOM 断点续跑
 - 推理完成后按需生成预览，预览失败不会破坏人体动作结果
 - 页面内播放预览，并分别下载 PT、相机视角、全局视角或 ZIP
+- Web 可一键启动/关闭本机 MuJoCo，并把同一任务发送到隔离的仿真 SONIC；仿真和真机链路由后端强制互斥
 - 上传临时文件自动清理，任务输入和结果统一保存在任务目录
 - Docker 优先的一键部署，以及供开发者使用的源码模式
 
@@ -100,25 +102,31 @@ runtime/jobs/<视频名>_<任务短 ID>/
 
 核心产物：
 
-- `hmr4d_results.pt`：当前发布结果；启用自动平地且保护条件通过时为 Global V1.1，否则为原始 FootMR
+- `hmr4d_results.pt`：当前发布结果；FootMR 及可选 Global V1.1 完成后，再经过严格孤立朝向跳变检查
 - `hmr4d_results_raw.pt`：启用自动平地时保留的原始 FootMR 结果
 - `ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt`：通过保护条件的 V1.1 候选
 - `ground_constraint_global_v1_1/metrics.json`：接触、修正量、保护条件和最终决策
+- `orientation_guard/metrics.json`：朝向峰值、触发边界、阈值和修复前后角速度
+- `orientation_guard/original_hmr4d_results.pt`、`orientation_guard/orientation_guard_hmr4d_results.pt`：仅实际触发时保存的修复前后 tensor
 - `long_video/manifest.json`、`long_video/metrics.json`：长视频推理模式、模型身份和耗时
 - `job.json`：任务摘要
 - `artifacts.zip`：当前可用结果的打包文件
 
 自动平地从原始 FootMR tensor 单次运行，只修改 `smpl_params_global.transl`，不会再串联旧 local-Y 后处理。按当前发布策略，保护项未通过但候选完整时仍发布约束结果并在任务详情显示诊断警告；脚本异常、候选缺失或 metrics 损坏会直接使任务失败，不再静默回退 raw。`hmr4d_results_raw.pt` 仍保留供下载和人工对照。页面/API 为兼容现有调用仍使用 `flat_y` 选项值，但它现在表示 Global V1.1。
 
+孤立朝向保护位于地面约束之后，只在 global 单帧转角至少 `80°`、incam 同一边界至少 `75°`，且峰值相对邻域高度显著、附近没有第二个同级峰值时触发。修复使用端点固定的 SO(3) 短窗口平滑，只修改 `global_orient`；正常转身、`body_pose`、`transl` 和 `betas` 不参与平滑。未触发的任务只保存 metrics，不复制额外 tensor。
+
 ## SONIC 接入（无需 Kimodo）
 
 本仓库已经内置 GVHMR SMPL-X22 到 SONIC reference 的转换和本地 ZMQ
 播放适配层，统一使用 `gvhmr` Conda 环境，不需要 Kimodo 仓库、Kimodo
-venv 或 PEFT。成功任务可直接在详情操作栏点击“发送到 SONIC”；按钮会从
+venv 或 PEFT。成功任务可在详情操作栏选择“发送到仿真”或“发送到真机”；按钮会从
 最终发布的 `hmr4d_results.pt` 生成或复用 50 FPS reference，并在后台推流，
 不会阻塞页面，也不会覆盖人体结果。推流期间可点击“暂停 SONIC”：Web 会停止
 live reference，SONIC policy 随后按自身配置平滑回到内置 idle/default reference，
-而不是保持动作最后一帧。也可使用 CLI：
+而不是保持动作最后一帧。推流还受 SONIC 模式硬联锁：接收端只有在
+`sonic_teleop` 内才订阅；切到 `normal` 或其他模式会立即使当前发送会话永久失效，
+再次进入 SONIC 后也不会续播，必须由用户重新点击发送。也可使用 CLI：
 
 ```bash
 conda run -n gvhmr python tools/sonic/convert_gvhmr.py \
@@ -127,7 +135,7 @@ conda run -n gvhmr python tools/sonic/convert_gvhmr.py \
   --metadata runtime/jobs/<任务目录>/sonic_conversion.json
 ```
 
-SONIC/MuJoCo 已经启动时可播放：
+SONIC/MuJoCo 已经启动时可通过仿真端口 5557 播放：
 
 ```bash
 conda run -n gvhmr python tools/sonic/play_reference.py \
@@ -139,8 +147,14 @@ SONIC，CLI 转换命令本身不会连接。
 输出固定为 50 FPS 的 `term1_local`、`root_quat` 和 `wrist`。该适配层已对
 jntm、lly、cxk、qhy、ydd 与旧 Kimodo 输入逐元素验证，数组最大差为 0。
 这只保证输入 SONIC 不变，不代表控制策略已解决踝关节跟踪或机器人限位问题。
-当前 ZMQ PUB 协议没有 ACK；页面“推流完成”仅表示 Web 端发完，不能证明
-SONIC 已实际接收。使用按钮前应先启动 SONIC/MuJoCo。
+Web 使用兼容 SUB 的 ZMQ XPUB 检查订阅生命周期：没有 `sonic_teleop` 订阅时零帧
+拒绝发送，播放中退订时立即终止；它仍没有逐帧执行 ACK，因此页面“推流完成”只能
+证明发送端完成，不能证明机器人实际执行了每一帧。该联锁同时要求机器人
+`raindrop` overlay 部署新版 SONIC `policy.py/state.py`，旧接收端不能视为已修复。
+Web 的“启动仿真”只会启动本机 MuJoCo 和仿真控制器，固定使用
+ROS Domain 73、`ROS_LOCALHOST_ONLY=1` 和本机 5557。真机使用独立的本机 5559；
+Web 不包含 SSH 或真机 launch 命令，也不会启动真机控制器。检测到任一真机隧道时
+后端拒绝启动/发送仿真，仿真未完全关闭时后端拒绝发送真机。
 
 任务详情中的“SONIC 速度”滑块支持 `0.25×～1.00×`，步长为 `0.05×`。
 倍率只调整下一次发送给 SONIC 的动作时间轴，各档均通过旋转 SLERP 重新采样并保持
@@ -158,6 +172,7 @@ SONIC 已实际接收。使用按钮前应先启动 SONIC/MuJoCo。
 ## 文档
 
 - [快速开始](docs/QUICKSTART.md)
+- [Web → MuJoCo/SONIC 仿真安全流程](docs/SONIC_SIMULATION.md)
 - [GVHMR Web → ELF3 SONIC 真机 Quickstart](docs/SONIC_REAL_ROBOT_QUICKSTART.md)
 - [Docker 与局域网部署](docs/DEPLOYMENT.md)
 - [源码开发环境](docs/INSTALL.md)

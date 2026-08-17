@@ -284,6 +284,82 @@ def _ground_constraint_fallback_reason(metrics, decision):
     return "；".join(reasons) if reasons else "保护条件未通过（未记录具体失败项）"
 
 
+def _apply_orientation_guard(output_dir, result_path):
+    """Repair only strict, isolated root-orientation impulses."""
+    import torch
+    from hmr4d.utils.orientation_guard import guard_isolated_orientation_jumps
+
+    output_dir = Path(output_dir)
+    result_path = Path(result_path)
+    guard_dir = output_dir / "orientation_guard"
+    guard_dir.mkdir(parents=True, exist_ok=True)
+    original_path = guard_dir / "original_hmr4d_results.pt"
+    guarded_path = guard_dir / "orientation_guard_hmr4d_results.pt"
+    metrics_path = guard_dir / "metrics.json"
+
+    # A process retry commonly sees the already-guarded public result. Preserve
+    # the original diagnostics instead of replacing them with a false
+    # "not-needed" report from the idempotent second pass.
+    if original_path.is_file() and guarded_path.is_file() and metrics_path.is_file():
+        try:
+            current = torch.load(result_path, map_location="cpu", weights_only=False)
+            cached = torch.load(guarded_path, map_location="cpu", weights_only=False)
+            same_orientation = all(
+                torch.equal(
+                    current[f"smpl_params_{space}"]["global_orient"],
+                    cached[f"smpl_params_{space}"]["global_orient"],
+                )
+                for space in ("global", "incam")
+            )
+            if same_orientation:
+                metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+                return {
+                    "orientation_guard_status": "applied",
+                    "orientation_guard_original_path": str(original_path.resolve()),
+                    "orientation_guard_results_path": str(guarded_path.resolve()),
+                    "orientation_guard_metrics_path": str(metrics_path.resolve()),
+                    "orientation_guard_detections": int(metrics.get("num_detections", 0)),
+                }
+        except (KeyError, OSError, RuntimeError, ValueError):
+            pass
+
+    prediction = torch.load(result_path, map_location="cpu", weights_only=False)
+    guarded, metrics = guard_isolated_orientation_jumps(prediction)
+    metrics_path.write_text(
+        json.dumps(metrics, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    if not metrics["triggered"]:
+        print(
+            "[Orientation Guard] No strict isolated root-orientation impulse detected.",
+            flush=True,
+        )
+        return {
+            "orientation_guard_status": "not_needed",
+            "orientation_guard_metrics_path": str(metrics_path.resolve()),
+            "orientation_guard_detections": 0,
+        }
+
+    shutil.copy2(result_path, original_path)
+    torch.save(guarded, guarded_path)
+    shutil.copy2(guarded_path, result_path)
+    frames = ", ".join(
+        str(item["boundary_frame"]) for item in metrics["detections"]
+    )
+    print(
+        f"[Orientation Guard] Repaired {metrics['num_detections']} isolated impulse(s) "
+        f"at frame boundaries: {frames}",
+        flush=True,
+    )
+    return {
+        "orientation_guard_status": "applied",
+        "orientation_guard_original_path": str(original_path.resolve()),
+        "orientation_guard_results_path": str(guarded_path.resolve()),
+        "orientation_guard_metrics_path": str(metrics_path.resolve()),
+        "orientation_guard_detections": int(metrics["num_detections"]),
+    }
+
+
 def _process(args):
     import hydra
     import torch
@@ -487,6 +563,7 @@ def _process(args):
         result_path,
         args.ground_constraint,
     )
+    orientation_result = _apply_orientation_guard(output_dir, result_path)
 
     if not args.save_intermediate:
         _cleanup_preprocess(preprocess_dir)
@@ -497,6 +574,7 @@ def _process(args):
         "hmr4d_results_path": str(result_path.resolve()),
         **long_video_result,
         **ground_result,
+        **orientation_result,
     }
 
 

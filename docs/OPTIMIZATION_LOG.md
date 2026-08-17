@@ -2115,6 +2115,298 @@ conda run -n gvhmr python tools/sonic/play_reference.py \
 
 ---
 
+## P33：严格孤立朝向跳变保护
+
+### 基本信息
+
+- 日期：2026-08-14
+- 分支：`main`
+- 状态：CPU 数值与局部 GPU 渲染已验证
+- 上游依据或实验基线：`idolm_20260814_135904` 的 frame 3318→3319 朝向突变
+- 范围：GVHMR/FootMR 后处理、任务产物、局部数值与视觉回归
+- 不包含：重新推理整段 `idolm`、修复普通快速转身、修改 body pose/root translation 或重渲染整段视频
+
+### 优化目标
+
+修复少数视频中人物正反面在单帧发生不合理大角度突变的问题，同时严格避免把真实转身、舞蹈 pivot 或普通较快动作当成异常平滑。
+
+### 关键实现
+
+- 在 FootMR 和可选 Contact Global V1.1 之后增加默认 orientation guard，避免地面约束缓存重用时覆盖朝向修复。
+- 只在 global 单帧 geodesic 转角不低于 `80°`、incam 同一边界不低于 `75°` 时进入候选。
+- 候选还必须同时通过局部中位数显著性、`2.5×` 相对显著性和邻域无第二个同级峰值检查；窗口靠近序列边缘、无法保留完整端点时不处理。
+- 对命中的边界采用半径 4 帧、端点固定的 SO(3) Lie-group Laplacian 平滑，重新分配同一次转身的角速度；不使用欧拉角。
+- 只替换 `smpl_params_global/incam.global_orient` 及 `net_outputs` 中对应副本。窗口外朝向、窗口端点、body pose、betas、incam/global translation 均保持逐元素不变。
+
+### 接口、配置与资产变化
+
+- 没有新增 Web 选项；该保护是严格条件下的默认安全后处理。
+- 每个任务保存 `orientation_guard/metrics.json`。只有实际触发时才额外保存 `original_hmr4d_results.pt` 和 `orientation_guard_hmr4d_results.pt`，并加入任务 artifacts/ZIP。
+- 输出 tensor schema、30 FPS 输入、自动平地选项和 SONIC 接口不变。
+
+### 验证方法与结果
+
+- 4 项无 GPU 单元测试通过：孤立峰值修复、普通快速转身不触发、邻近双峰不触发、shape/finite 检查。
+- `idolm` 只检测到 frame `3318→3319`：global 峰值 `107.24°→22.25°`，incam 峰值 `94.46°→21.78°`；修复窗口 `3314..3323` 内最大值分别为 `22.25°` 和 `21.97°`。
+- `global/incam body_pose`、`betas`、`transl` 以及窗口外和两个端点均逐元素完全相同。
+- `wudao_20260813_195518` 全片 global/incam 最大单帧转角约 `29.30°/29.50°`，检测结果为 0，没有修改真实转身。
+- 未重新推理或渲染整段 `idolm`。直接复用现有 tensor，截取 frame `3288..3335`（109.6～111.2 秒，共 48 帧）完成修复前后 incam/global GPU 渲染。
+- 局部对比产物位于 `runtime/validation/p33_idolm_orientation_guard_frames_3288_3335/`；数值报告为 `validation_metrics.json`，主要视频为 `idolm_orientation_guard_before_after_incam.mp4` 和 `idolm_orientation_guard_before_after_global.mp4`。
+
+### 未完成项和已知风险
+
+- 当前验证覆盖一个确定的孤立极端峰值和一个正常转身阴性样本，不代表已经覆盖所有遮挡、多人交叠或持续正反面识别错误。
+- 持续多帧错误、相邻多个极端峰值和序列开头/结尾异常会被严格条件拒绝，避免自动修错造成更大退化，后续需单独设计。
+- 本项只重分配 root 朝向速度，不修复 `wudao` 中可能存在的局部膝/踝姿态问题。
+
+### 回退方式
+
+移除 `external_core_worker.py` 中 `_apply_orientation_guard` 调用即可停止默认处理；已生成任务的 `orientation_guard/original_hmr4d_results.pt` 可用于恢复保护前结果。
+
+### 主要涉及文件
+
+- `hmr4d/utils/orientation_guard.py`
+- `hmr4d/service/external_core_worker.py`
+- `hmr4d/service/manager.py`
+- `tests/test_orientation_guard.py`
+- `README.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P34：Web 内置 MuJoCo/SONIC 仿真与真机硬隔离
+
+### 基本信息
+
+- 日期：2026-08-17
+- 分支：`main`
+- 状态：本机真实仿真生命周期与 CPU/API 回归已验证，真机未启动
+- 上游依据或实验基线：ELF3 本机 MuJoCo、`example_demo.launch.py` 和 GVHMR 内置 SONIC publisher
+- 范围：Web 启动/关闭本机仿真、任务发送到仿真、仿真/真机互锁、端口隔离和操作文档
+- 不包含：Web 启动真机、自动 SSH、修改真机控制器或 `raindrop`、真机动作验收
+
+### 优化目标
+
+让任务先在页面内发送到 MuJoCo 人工检查，同时保证 Web 没有启动真机的能力，并从后端而非仅靠按钮状态阻止仿真与真机并行发送。
+
+### 关键实现
+
+- 新增 `SimulationManager`，只允许启动本机 `elf3_dof29_sim.launch.py` 和不带 `_hw` 的 `example_demo.launch.py`。
+- 仿真固定为 ROS Domain 73、`ROS_LOCALHOST_ONLY=1` 和本机 5557；真机 publisher 改用独立本机 5559，SSH reverse tunnel 相应为 `5559 → 机器人 5558`。
+- 启动仿真前先停止 Web 管理的真机 publisher，再拒绝所有真机隧道；向真机发送要求仿真完全停止、没有外部仿真进程、存在 5559 隔离隧道且请求显式携带 `confirm_real=true`。
+- 检测到旧 `5557 → 机器人 5558` 隧道时，两种发送均拒绝，防止机器人订阅仿真 publisher。
+- 启动顺序固定为 MuJoCo、ELF3 controller、等待 `normal`、发布 `btn_10=9`、等待 `sonic_teleop`；关闭时先暂停仿真动作、请求返回 `normal`，再按控制器和 MuJoCo 顺序退出。
+- ROS 状态读取使用 `--full-length` 并解析 `current.name`；关闭时继续清理 launch 进程组，避免 controller 子进程残留。
+- ROS 状态/节点探测显式使用 `--no-daemon`，避免 Domain 73 的 ROS CLI daemon 脱离 launch 进程组；systemd 服务还显式注入 MuJoCo 运行库目录，不依赖交互式 `.bashrc`。
+- 页面显示“启动仿真 / 关闭仿真 / 发送到仿真 / 发送到真机”，真机发送保留二次确认。无实时调度权限时明确标为“非实时调度”。
+
+### 接口、配置与资产变化
+
+- 新增 `GET /api/simulation/status`、`POST /api/simulation/start`、`POST /api/simulation/stop` 和 `POST /jobs/{id}/to-simulation`。
+- 原 `POST /jobs/{id}/to-sonic` 明确只表示真机，未携带 `confirm_real=true` 时直接拒绝。
+- 新增 `GVHMR_SIMULATION_WORKSPACE`、`GVHMR_SIMULATION_BXI_SETUP`、`GVHMR_SIMULATION_MUJOCO_LIBRARY_DIR` 和 `GVHMR_SIMULATION_ROS_DOMAIN_ID`；默认指向当前本机 ELF3 仿真工作区、MuJoCo 运行库和 Domain 73。
+- 新增 `docs/SONIC_SIMULATION.md`，真机 Quickstart 的本机 publisher 端口由 5557 更新为 5559。
+
+### 验证方法与结果
+
+- 本机真实运行和正式 Web API 均完成 `stopped → starting → ready(sonic_teleop) → stopping → stopped`，关闭后仿真进程、ROS Domain 73 daemon、旧/新真机隧道检查数量均为 0。
+- 通过 Web API 把 `job_0ada15971255` 的 611 帧、50 FPS reference 完整发送到仿真：5557 建立连接，播放状态为 `complete 611/611 simulation`；全过程 5559 未监听、未连接。
+- 真实启动确认 `normal` 后才发送 SONIC 状态键，并确认页面管理的进程均位于 ROS Domain 73、localhost-only；测试期间 5559 未监听，没有建立 SSH 隧道，也没有启动或发送真机。
+- `tests/test_simulation_safety.py`：7/7 通过，覆盖两类隧道识别、目标互锁、显式真机确认、launch 命令安全边界、完整状态解析和诊断命令误报防护。
+- `tests/test_service_web.py`：29/29 通过，包含启动仿真前停止真机 publisher、关闭仿真前停止仿真 publisher、真机/仿真 API 路由与速度参数。
+- `python -m unittest discover -s tests -p 'test_*.py' -v`：50/50 通过；`tools.sonic.test_sonic`：4/4 通过。
+- Python 编译、`node --check` 和 `git diff --check` 通过。
+
+### 未完成项和已知风险
+
+- 当前用户服务的 realtime priority 上限为 0，控制器会报告无法使用 `SCHED_FIFO/99`。仿真仍能运行，但只能作为动作预检，不能作为严格真机时序验收。
+- ZMQ PUB 没有接收 ACK；“发送完成”仍只代表 Web publisher 已完成。
+- Web 能阻止自身的冲突操作，但无法阻止用户在系统外强行启动硬件控制器或新建隧道，因此文档仍要求仿真期间不要手工建立真机链路。
+
+### 回退方式
+
+移除仿真 API/UI 和 `SimulationManager`，并恢复真机 publisher 到旧端口即可回退；回退到 5557 真机端口会重新产生与仿真的端口复用风险，不建议在保留 Web 仿真功能时执行。
+
+### 主要涉及文件
+
+- `hmr4d/service/simulation.py`
+- `hmr4d/service/common.py`
+- `hmr4d/service/manager.py`
+- `hmr4d/service/server.py`
+- `hmr4d/service/static_app/index.html`
+- `hmr4d/service/static_app/app.js`
+- `hmr4d/service/static_app/styles.css`
+- `tests/test_simulation_safety.py`
+- `tests/test_service_web.py`
+- `docs/SONIC_SIMULATION.md`
+- `docs/SONIC_REAL_ROBOT_QUICKSTART.md`
+- `README.md`
+
+---
+
+## P35：SONIC 模式切换硬联锁与一次性推流会话
+
+### 基本信息
+
+- 日期：2026-08-17
+- 分支：`main`
+- 状态：Web、接收端、本机 MuJoCo 与 CPU/API 回归已验证；真机 overlay 尚未部署
+- 上游依据或实验基线：真机播放中 `sonic_teleop → normal → sonic_teleop` 后旧动作继续跟踪的高风险现象
+- 范围：Web ZMQ 发送端、ELF3 SONIC 接收端生命周期、同任务重发竞态、暂停终态和安全文档
+- 不包含：Web 部署或启动真机、逐帧执行 ACK、绕过控制器姿态安全状态
+
+### 优化目标
+
+把控制模式变成推流的硬前置条件：只有 `sonic_teleop` 可以开始和维持推流；离开该模式时当前会话立即永久失效，再次进入后必须人工重新发送，绝不从旧进度自动续播。
+
+### 关键实现
+
+- Web publisher 从 ZMQ `PUB` 改为兼容现有 `SUB` 的 `XPUB`，开始发送前等待 `smpl_ref` 订阅；无订阅时零帧失败。
+- 播放期间逐发送周期消费订阅事件；收到退订后，即使马上又收到新订阅，也把当前会话作为致命错误终止并关闭 publisher。
+- 每次发送使用递增 generation 作为一次性会话身份。被替换会话的延迟 `ERROR/STOPPED/COMPLETE` 回调会被丢弃，不能覆盖新会话状态或清除新会话所有权。
+- 暂停先原子作废 generation，再等待发送线程退出，避免 `STOPPED` 回调在 2 秒锁等待后覆盖显式 `PAUSED`。
+- ELF3 `SonicTeleopState.on_enter()` 才调用 `activate_live_receiver()`；`on_exit()` 立即调用 `deactivate_live_receiver()`，关闭 SUB、清空 live reference 和接收队列。policy 构造时不再常驻连接 Web。
+- 接收端改动位于本机 `/home/user-kevien/bxi_rl_controller_ros2_example` 的 `com.bxi.sonic/policy.py`、`state.py`，已完成 `colcon build --packages-select bxi_example_py_elf3`；不会自动进入机器人 `/home/bxi/raindrop` overlay。
+
+### 接口、配置与资产变化
+
+- Web API 路径、SONIC topic、消息二进制格式和 5557/5559 端口不变。
+- `SonicPlaybackController` 新增 `subscriber_timeout_seconds`，默认 2 秒。
+- 新错误明确区分“开始时不在 SONIC”与“播放中退出 SONIC”。页面保持终态，不在重新进入模式后自动发起请求。
+- 真机 Quickstart 新增接收端版本检查和部署前置条件；未部署新版 overlay 时禁止把本项视为真机已修复。
+
+### 验证方法与结果
+
+- 本机 MuJoCo/Domain 73 实测订阅生命周期为 `进入 SONIC: subscribe → 切 normal: unsubscribe → 再进入 SONIC: new subscribe`。
+- Web 实测播放中切到 `normal` 后立即得到“当前推流已安全终止”，5557 关闭且帧数不再增长；停留 `normal` 时重发为零帧失败；重新进入 SONIC 后等待期间 5557 保持关闭，旧会话未恢复。
+- 全程 5559 未监听、未连接，没有建立 SSH 隧道、没有启动或发送真机。
+- `tools.sonic.test_sonic`：6/6 通过，覆盖无订阅零帧、退订停止和快速重订阅不能恢复旧会话。
+- `tests/test_service_web.py`：31/31 通过，新增同任务旧 generation 回调隔离和暂停终态回归。
+- `tests/test_simulation_safety.py`：8/8 通过；本项相关合计 45/45。
+- Web 全量 `tests/test_*.py`：53/53 通过；Python 编译、前端 `node --check`、Web 与接收端 `git diff --check` 均通过。
+- 接收端 ROS 包重新构建成功；本机 MuJoCo 真实状态切换和订阅事件验证通过。
+
+### 未完成项和已知风险
+
+- 真机 `/home/bxi/raindrop` 尚未部署接收端的 `policy.py/state.py`，因此旧真机控制器仍可能常驻订阅。完成现场同步、构建和重启前，不得进行依赖本联锁的真机测试。
+- XPUB 只确认 topic 的订阅和退订，不确认机器人执行了每一帧；实体急停、可靠支撑和现场观察仍不可替代。
+- 控制器因姿态安全进入 `zero_torque` 时不能直接请求 SONIC。本项不会为了恢复通信而绕过状态机安全保护。
+
+### 回退方式
+
+Web 可恢复为普通 PUB，接收端可恢复构造时常驻 SUB，但这会重新引入非 SONIC 模式仍保持连接和旧会话续播风险，不建议回退。若只回退任一端，必须停止真机 Web 推流，直到发送端和接收端版本重新匹配。
+
+### 主要涉及文件
+
+- `hmr4d/utils/sonic.py`
+- `hmr4d/service/manager.py`
+- `tools/sonic/test_sonic.py`
+- `tests/test_service_web.py`
+- `README.md`
+- `docs/SONIC_SIMULATION.md`
+- `docs/SONIC_REAL_ROBOT_QUICKSTART.md`
+- `docs/OPTIMIZATION_LOG.md`
+- 外部接收端：`/home/user-kevien/bxi_rl_controller_ros2_example/src/bxi_example_py_elf3/mods/com.bxi.sonic/policy.py`
+- 外部接收端：`/home/user-kevien/bxi_rl_controller_ros2_example/src/bxi_example_py_elf3/mods/com.bxi.sonic/state.py`
+
+---
+
+## P36：仿真启动冲突原因与自动恢复
+
+### 基本信息
+
+- 日期：2026-08-17
+- 分支：`main`
+- 状态：实现并验证
+- 上游依据或实验基线：页面检测到 Web 外 `example_demo.launch.py` 时只禁用按钮，没有说明原因，且外部进程退出后停止状态不会继续轮询
+- 范围：仿真按钮状态、冲突提示和外部阻塞条件轮询
+- 不包含：自动终止外部控制器、绕过仿真/真机互锁
+
+### 优化目标
+
+让用户直接看到“启动仿真”不可用的具体原因，并在用户从原终端正常关闭冲突进程或隧道后自动恢复按钮。
+
+### 关键实现
+
+- 状态栏和按钮 tooltip 明确区分旧 5557 真机隧道、5559 真机隧道和 Web 外仿真进程，并显示外部进程数量。
+- `stopped` 状态只要仍有上述外部阻塞条件就继续每 2.2 秒刷新；阻塞消失后按钮自动恢复并停止额外轮询。
+- 后端安全判定不变，页面没有新增自动 kill、SSH 或真机控制能力。
+
+### 验证方法与结果
+
+- 确认本次阻塞来自 Domain 173、`/home/user-kevien/testmodel/sim_workspace` 的两个外部控制器进程；按授权对其独立进程组发送 `SIGINT` 后正常退出。
+- `/api/simulation/status` 随后返回 `state=stopped`、`external_simulation_processes=[]`，5557/5559 均未监听。
+- Web 静态回归、`node --check` 和 `git diff --check` 通过。
+
+### 未完成项和已知风险
+
+- 页面只报告冲突，不提供“关闭外部进程”按钮；进程仍应由其原始终端正常停止。
+- 浏览器标签页必须加载包含本项的最新版 `app.js`；旧缓存页面可强制刷新一次。
+
+### 回退方式
+
+移除额外提示和外部条件轮询即可回退，不影响后端安全互锁。
+
+### 主要涉及文件
+
+- `hmr4d/service/static_app/app.js`
+- `tests/test_service_web.py`
+- `docs/SONIC_SIMULATION.md`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
+## P37：SONIC 播放期间冻结任务队列
+
+### 基本信息
+
+- 日期：2026-08-17
+- 分支：`main`
+- 状态：实现并完成 Web 回归
+- 上游依据或实验基线：仿真或真机播放时，2.2 秒轮询会反复刷新和重绘整个任务队列
+- 范围：前端轮询、当前播放任务详情、任务队列刷新时机
+- 不包含：停止任务处理进度、停止仿真状态检查、修改 SONIC 发送频率
+
+### 优化目标
+
+SONIC 播放期间保持左侧任务队列的位置、顺序和卡片内容不变，同时继续显示当前任务的发送进度和仿真安全状态。
+
+### 关键实现
+
+- 将 SONIC 播放轮询与全量 `jobs?limit=80` 队列轮询拆开。
+- 播放期间只请求当前播放任务的 `GET /jobs/{id}`，更新详情面板、发送进度和操作按钮，不调用 `renderJobs()`。
+- 仿真 `ready` 状态只刷新仿真状态，不再无条件刷新任务队列。
+- 播放完成、报错或暂停后执行一次全量刷新，使队列一次性同步最终状态；用户手工点击刷新仍然有效。
+- 使用独立 `sonicPollingJobId`，即使用户播放中切换查看其他任务，也不会丢失对真实播放任务的终态检查。
+
+### 接口、配置与资产变化
+
+- 后端 API、数据库和 SONIC 消息不变，仅调整前端轮询策略。
+- 更新 `app.js` 资源版本，避免旧标签页继续使用会自动刷新队列的缓存脚本。
+
+### 验证方法与结果
+
+- Web 静态回归确认包含独立 playback job 轮询和 processing job 全量轮询分支。
+- `tests/test_service_web.py`、`node --check` 和 `git diff --check` 通过。
+
+### 未完成项和已知风险
+
+- 播放期间后台新任务或其他任务进度仍在后端正常变化，只是队列暂不显示；播放结束后会一次性同步。
+- 用户主动点击“刷新任务”属于显式操作，仍会立即更新队列。
+
+### 回退方式
+
+恢复 polling interval 中无条件调用 `refreshJobs()` 即可回退，但会重新出现播放期间队列跳动。
+
+### 主要涉及文件
+
+- `hmr4d/service/static_app/app.js`
+- `hmr4d/service/static_app/index.html`
+- `tests/test_service_web.py`
+- `docs/OPTIMIZATION_LOG.md`
+
+---
+
 ## 后续优化记录模板
 
 复制以下小节并追加到本文档，不能覆盖历史记录。

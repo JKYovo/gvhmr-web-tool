@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import threading
 import unittest
+from collections import deque
 
 import numpy as np
 
@@ -35,16 +36,34 @@ def reference(frames: int = 3) -> SonicReference:
 
 
 class FakeSocket:
-    def __init__(self):
+    def __init__(self, *, subscribed=True):
         self.endpoint = None
         self.messages = []
         self.closed = False
+        self.options = []
+        self.events = deque([b"\x01smpl_ref"] if subscribed else [])
+
+    def setsockopt(self, option, value):
+        self.options.append((option, value))
 
     def bind(self, endpoint):
         self.endpoint = endpoint
 
     def send(self, message):
         self.messages.append(message)
+
+    def poll(self, timeout=0, flags=0):
+        return int(bool(self.events))
+
+    def recv(self, flags=0):
+        if not self.events:
+            import zmq
+
+            raise zmq.Again()
+        return self.events.popleft()
+
+    def disconnect_subscriber(self):
+        self.events.append(b"\x00smpl_ref")
 
     def close(self, linger=0):
         self.closed = True
@@ -120,6 +139,54 @@ class SonicTests(unittest.TestCase):
         self.assertEqual(len(socket.messages), sent_after_stop)
         self.assertTrue(socket.closed)
         self.assertEqual(states[-1], PlaybackState.STOPPED)
+
+    def test_playback_requires_sonic_subscriber(self):
+        socket = FakeSocket(subscribed=False)
+        done = threading.Event()
+        errors = []
+
+        def callback(state, _frame_index, _frame_count, message):
+            if state == PlaybackState.ERROR:
+                errors.append(message)
+                done.set()
+
+        controller = SonicPlaybackController(
+            endpoint="tcp://test:5557",
+            subscriber_timeout_seconds=0.02,
+            socket_factory=lambda: socket,
+        )
+        controller.run(0, reference(), callback)
+        self.assertTrue(done.wait(2))
+        self.assertEqual(socket.messages, [])
+        self.assertIn("sonic_teleop", errors[-1])
+
+    def test_unsubscribe_terminates_current_stream_and_cannot_resume(self):
+        socket = FakeSocket()
+        streaming = threading.Event()
+        failed = threading.Event()
+        errors = []
+
+        def callback(state, _frame_index, _frame_count, message):
+            if state == PlaybackState.STREAMING:
+                streaming.set()
+            elif state == PlaybackState.ERROR:
+                errors.append(message)
+                failed.set()
+
+        controller = SonicPlaybackController(
+            endpoint="tcp://test:5557",
+            pre_roll_seconds=0,
+            final_hold_seconds=0,
+            socket_factory=lambda: socket,
+        )
+        controller.run(0, reference(500), callback)
+        self.assertTrue(streaming.wait(2))
+        socket.disconnect_subscriber()
+        self.assertTrue(failed.wait(2))
+        sent_after_disconnect = len(socket.messages)
+        threading.Event().wait(0.02)
+        self.assertEqual(len(socket.messages), sent_after_disconnect)
+        self.assertIn("安全终止", errors[-1])
 
 
 if __name__ == "__main__":

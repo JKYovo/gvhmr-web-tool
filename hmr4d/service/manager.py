@@ -18,6 +18,7 @@ from hmr4d.service.common import (
     zip_artifacts,
 )
 from hmr4d.service.external_core import ExternalCoreRunner
+from hmr4d.service.simulation import SimulationManager
 
 
 _PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})%")
@@ -98,13 +99,15 @@ def _progress_from_log(message, task_kind):
         return 98, "动作恢复完成", False
     if "[ground constraint]" in lower:
         return 99, "应用地面约束", False
+    if "[orientation guard]" in lower:
+        return 99, "检查朝向连续性", False
     if "[cleanup]" in lower:
         return 99, "整理输出文件", False
     return None
 
 
 class JobManager:
-    def __init__(self, settings, store):
+    def __init__(self, settings, store, simulation_manager=None):
         self.settings = settings
         self.store = store
         self._runner = None
@@ -113,8 +116,12 @@ class JobManager:
         self._thread = None
         self._sonic_controller = None
         self._sonic_job_id = None
+        self._sonic_target = None
+        self._sonic_endpoint = None
         self._sonic_generation = 0
         self._sonic_lock = threading.RLock()
+        self._sonic_callback_lock = threading.Lock()
+        self.simulation = simulation_manager or SimulationManager(settings)
 
     def start(self):
         if self._thread is not None:
@@ -129,6 +136,9 @@ class JobManager:
             if self._sonic_controller is not None:
                 self._sonic_controller.close()
             self._sonic_job_id = None
+            self._sonic_target = None
+            self._sonic_endpoint = None
+        self.simulation.shutdown()
         close_runner = getattr(self._runner, "close", None)
         if callable(close_runner):
             close_runner()
@@ -421,8 +431,10 @@ class JobManager:
             self.store.update_batch_counts(job["batch_id"])
         return job
 
-    def send_to_sonic(self, job_id, *, speed=1.0):
-        """Prepare and asynchronously stream a completed job to local SONIC."""
+    def send_to_sonic(self, job_id, *, speed=1.0, target=None, confirm_real=False):
+        """Stream to an explicitly selected, safety-checked SONIC target."""
+        target = str(target or "").strip().lower()
+        endpoint = self.simulation.assert_can_stream(target, confirm_real=confirm_real)
         speed = float(speed)
         if not math.isfinite(speed):
             raise ValueError("SONIC speed must be finite.")
@@ -508,67 +520,86 @@ class JobManager:
                 fps=float(data["fps"]),
             )
 
-        job["sonic_status"] = "preparing"
-        job["sonic_error"] = None
-        job["sonic_frame"] = 0
-        job["sonic_frames"] = reference.frame_count
-        job["sonic_speed"] = speed
-        job["sonic_updated_at"] = utc_now_iso()
-        job.setdefault("artifacts", {}).update(
-            {
-                "sonic_reference_path": str(reference_path),
-                "sonic_metadata_path": str(metadata_path),
-            }
-        )
-        self._append_log(
-            job,
-            f"[SONIC] Prepared {reference.frame_count} frames at {reference.fps:g} FPS"
-            f" / {speed:g}x playback"
-            f" ({'cache reused' if reused else 'new reference'}).",
-        )
-        self._finalize_job(job)
-
         last_saved_frame = -25
         playback_generation = None
 
         def callback(state, frame_index, frame_count, message):
             nonlocal last_saved_frame
-            if (
-                state == PlaybackState.STREAMING
-                and frame_index < frame_count
-                and frame_index - last_saved_frame < 25
-            ):
-                return
-            current = self.store.get_job(job_id)
-            if current is None:
-                return
-            current["sonic_status"] = state.value
-            current["sonic_frame"] = int(frame_index)
-            current["sonic_frames"] = int(frame_count)
-            current["sonic_updated_at"] = utc_now_iso()
-            if state == PlaybackState.ERROR:
-                current["sonic_error"] = message or "Unknown SONIC playback error."
-                self._append_log(current, f"[SONIC] Playback failed: {current['sonic_error']}")
-            elif state == PlaybackState.COMPLETE:
-                current["sonic_error"] = None
-                self._append_log(current, "[SONIC] Playback complete.")
-            elif state == PlaybackState.STOPPED:
-                self._append_log(current, "[SONIC] Playback replaced or stopped.")
-            self.store.save_job(current)
-            last_saved_frame = int(frame_index)
-            if state in {PlaybackState.COMPLETE, PlaybackState.STOPPED, PlaybackState.ERROR}:
+            # A replaced playback thread may deliver its terminal callback a
+            # few milliseconds after the new session has started.  Such a
+            # callback must neither overwrite the new job state nor clear its
+            # ownership.  The generation is the session identity; job_id alone
+            # is insufficient because users commonly replay the same job.
+            with self._sonic_callback_lock:
+                if self._sonic_generation != playback_generation:
+                    return
                 if (
-                    self._sonic_job_id == job_id
-                    and self._sonic_generation == playback_generation
+                    state == PlaybackState.STREAMING
+                    and frame_index < frame_count
+                    and frame_index - last_saved_frame < 25
                 ):
-                    self._sonic_job_id = None
+                    return
+                current = self.store.get_job(job_id)
+                if current is None:
+                    return
+                current["sonic_status"] = state.value
+                current["sonic_frame"] = int(frame_index)
+                current["sonic_frames"] = int(frame_count)
+                current["sonic_target"] = target
+                current["sonic_updated_at"] = utc_now_iso()
+                if state == PlaybackState.ERROR:
+                    current["sonic_error"] = message or "Unknown SONIC playback error."
+                    self._append_log(current, f"[SONIC:{target}] Playback failed: {current['sonic_error']}")
+                elif state == PlaybackState.COMPLETE:
+                    current["sonic_error"] = None
+                    self._append_log(current, f"[SONIC:{target}] Playback complete.")
+                elif state == PlaybackState.STOPPED:
+                    self._append_log(current, f"[SONIC:{target}] Playback replaced or stopped.")
+                self.store.save_job(current)
+                last_saved_frame = int(frame_index)
+                if state in {PlaybackState.COMPLETE, PlaybackState.STOPPED, PlaybackState.ERROR}:
+                    if (
+                        self._sonic_job_id == job_id
+                        and self._sonic_generation == playback_generation
+                    ):
+                        self._sonic_job_id = None
+                        self._sonic_target = None
 
         with self._sonic_lock:
-            if self._sonic_controller is None:
-                self._sonic_controller = SonicPlaybackController()
-            self._sonic_generation += 1
-            playback_generation = self._sonic_generation
-            self._sonic_job_id = job_id
+            if self._sonic_controller is None or self._sonic_endpoint != endpoint:
+                if self._sonic_controller is not None:
+                    self._sonic_controller.close()
+                self._sonic_controller = SonicPlaybackController(endpoint=endpoint)
+                self._sonic_endpoint = endpoint
+            with self._sonic_callback_lock:
+                self._sonic_generation += 1
+                playback_generation = self._sonic_generation
+                self._sonic_job_id = job_id
+                self._sonic_target = target
+
+            # Publish PREPARING only after this generation owns the controller.
+            # This prevents the terminal callback of a replaced session from
+            # racing with and overwriting the new session's initial state.
+            job["sonic_status"] = "preparing"
+            job["sonic_error"] = None
+            job["sonic_frame"] = 0
+            job["sonic_frames"] = reference.frame_count
+            job["sonic_speed"] = speed
+            job["sonic_target"] = target
+            job["sonic_updated_at"] = utc_now_iso()
+            job.setdefault("artifacts", {}).update(
+                {
+                    "sonic_reference_path": str(reference_path),
+                    "sonic_metadata_path": str(metadata_path),
+                }
+            )
+            self._append_log(
+                job,
+                f"[SONIC:{target}] Prepared {reference.frame_count} frames at {reference.fps:g} FPS"
+                f" / {speed:g}x playback"
+                f" ({'cache reused' if reused else 'new reference'}).",
+            )
+            self._finalize_job(job)
             self._sonic_controller.run(0, reference, callback)
         return {
             "job_id": job_id,
@@ -577,6 +608,8 @@ class JobManager:
             "frames": reference.frame_count,
             "fps": reference.fps,
             "speed": speed,
+            "target": target,
+            "endpoint": endpoint,
             "duration_s": (reference.frame_count - 1) / reference.fps,
             "reused": reused,
         }
@@ -589,8 +622,16 @@ class JobManager:
         with self._sonic_lock:
             if self._sonic_job_id != job_id or self._sonic_controller is None:
                 raise RuntimeError("This job is not currently streaming to SONIC.")
+            # Invalidate this session before waiting for the playback thread.
+            # Its final STOPPED callback is then stale and cannot overwrite the
+            # explicit PAUSED state written below.  This also avoids a lock
+            # inversion between pause_sonic() and the playback callback.
+            with self._sonic_callback_lock:
+                self._sonic_generation += 1
             stopped = self._sonic_controller.stop(0)
             self._sonic_job_id = None
+            target = self._sonic_target
+            self._sonic_target = None
         if not stopped:
             raise RuntimeError("SONIC streaming has already stopped.")
 
@@ -602,16 +643,26 @@ class JobManager:
         current["sonic_updated_at"] = utc_now_iso()
         self._append_log(
             current,
-            "[SONIC] Streaming paused; policy will blend back to its idle reference.",
+            f"[SONIC:{target or 'unknown'}] Streaming paused; policy will blend back to its idle reference.",
         )
         self.store.save_job(current)
         return {
             "job_id": job_id,
             "status": "paused",
+            "target": target,
             "fallback": "idle_reference",
             "timeout_s": 0.5,
             "blend_s": 0.4,
         }
+
+    def pause_active_sonic(self, *, target=None):
+        """Pause the active stream when it belongs to the requested target."""
+        with self._sonic_lock:
+            job_id = self._sonic_job_id
+            active_target = self._sonic_target
+        if job_id is None or (target is not None and active_target != target):
+            return None
+        return self.pause_sonic(job_id)
 
     def _append_log(self, job, message):
         job.setdefault("logs", []).append(message)
@@ -715,6 +766,7 @@ class JobManager:
         if not legacy_constraint_result.is_file():
             legacy_constraint_result = legacy_constraint_dir / "flat_ground_y_hmr4d_results.pt"
         legacy_constraint_metrics = legacy_constraint_dir / "metrics.json"
+        orientation_dir = output_dir / "orientation_guard"
         if not constraint_metrics.is_file() and legacy_constraint_metrics.is_file():
             constraint_metrics = legacy_constraint_metrics
         existing = {
@@ -730,6 +782,13 @@ class JobManager:
             "global_contact_results_path": str(constraint_result),
             "flat_ground_y_results_path": str(legacy_constraint_result),
             "ground_constraint_metrics_path": str(constraint_metrics),
+            "orientation_guard_original_path": str(
+                orientation_dir / "original_hmr4d_results.pt"
+            ),
+            "orientation_guard_results_path": str(
+                orientation_dir / "orientation_guard_hmr4d_results.pt"
+            ),
+            "orientation_guard_metrics_path": str(orientation_dir / "metrics.json"),
             "long_video_manifest_path": str(output_dir / "long_video" / "manifest.json"),
             "long_video_metrics_path": str(output_dir / "long_video" / "metrics.json"),
             "sonic_reference_path": str(output_dir / "sonic_reference.npz"),
@@ -760,6 +819,18 @@ class JobManager:
             (
                 output_dir / "ground_constraint_global_v1_1" / "metrics.json",
                 "ground_constraint_global_v1_1/metrics.json",
+            ),
+            (
+                output_dir / "orientation_guard" / "original_hmr4d_results.pt",
+                "orientation_guard/original_hmr4d_results.pt",
+            ),
+            (
+                output_dir / "orientation_guard" / "orientation_guard_hmr4d_results.pt",
+                "orientation_guard/orientation_guard_hmr4d_results.pt",
+            ),
+            (
+                output_dir / "orientation_guard" / "metrics.json",
+                "orientation_guard/metrics.json",
             ),
             (output_dir / "long_video" / "manifest.json", "long_video/manifest.json"),
             (output_dir / "long_video" / "metrics.json", "long_video/metrics.json"),

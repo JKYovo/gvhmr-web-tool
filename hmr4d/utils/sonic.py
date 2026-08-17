@@ -258,10 +258,21 @@ def pack_smpl_ref_message(fields: dict[str, np.ndarray]) -> bytes:
 
 
 class SonicPlaybackController:
-    def __init__(self, endpoint: str | None = None, *, pre_roll_seconds: float = 0.2, final_hold_seconds: float = 0.2, socket_factory: Callable[[], object] | None = None) -> None:
+    def __init__(
+        self,
+        endpoint: str | None = None,
+        *,
+        pre_roll_seconds: float = 0.2,
+        final_hold_seconds: float = 0.2,
+        subscriber_timeout_seconds: float = 2.0,
+        socket_factory: Callable[[], object] | None = None,
+    ) -> None:
         self.endpoint = endpoint or os.environ.get("SONIC_SMPL_REF_ENDPOINT", DEFAULT_ENDPOINT)
         self.pre_roll_seconds = float(pre_roll_seconds)
         self.final_hold_seconds = float(final_hold_seconds)
+        self.subscriber_timeout_seconds = float(subscriber_timeout_seconds)
+        if not math.isfinite(self.subscriber_timeout_seconds) or self.subscriber_timeout_seconds <= 0.0:
+            raise ValueError("subscriber_timeout_seconds must be positive and finite")
         self._socket_factory = socket_factory
         self._lock = threading.Lock()
         self._owner_client_id: int | None = None
@@ -303,9 +314,54 @@ class SonicPlaybackController:
             import zmq
         except ImportError as exc:
             raise RuntimeError("pyzmq is required for SONIC playback") from exc
-        socket = zmq.Context.instance().socket(zmq.PUB)
+        # XPUB is wire-compatible with SUB but exposes subscription lifecycle.
+        # The receiver exists only while the robot is in sonic_teleop, so an
+        # unsubscribe is a hard mode interlock rather than a recoverable gap.
+        socket = zmq.Context.instance().socket(zmq.XPUB)
         socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.XPUB_VERBOSE, 1)
         return socket
+
+    @staticmethod
+    def _read_subscription_events(socket: object, connected: bool) -> tuple[bool, bool]:
+        import zmq
+
+        disconnected = False
+        topic = SONIC_TOPIC.encode("utf-8")
+        while socket.poll(timeout=0, flags=zmq.POLLIN):
+            try:
+                event = socket.recv(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                break
+            if not event or event[1:] != topic:
+                continue
+            if event[0] == 1:
+                connected = True
+            elif event[0] == 0:
+                connected = False
+                disconnected = True
+        return connected, disconnected
+
+    def _wait_for_subscriber(self, socket: object, stop_event: threading.Event) -> bool:
+        deadline = time.monotonic() + self.subscriber_timeout_seconds
+        connected = False
+        while time.monotonic() < deadline:
+            connected, _ = self._read_subscription_events(socket, connected)
+            if connected:
+                return True
+            if stop_event.wait(0.01):
+                return False
+        raise RuntimeError(
+            "SONIC 接收端未连接；只有处于 sonic_teleop 模式时才能开始推流。"
+        )
+
+    def _assert_subscriber_active(self, socket: object, connected: bool) -> bool:
+        connected, disconnected = self._read_subscription_events(socket, connected)
+        if disconnected or not connected:
+            raise RuntimeError(
+                "SONIC 接收端已退出 sonic_teleop；当前推流已安全终止，重新进入后必须重新发送。"
+            )
+        return connected
 
     @staticmethod
     def _notify(callback: PlaybackCallback | None, state: PlaybackState, frame_index: int, frame_count: int, message: str | None = None) -> None:
@@ -326,12 +382,18 @@ class SonicPlaybackController:
             self._notify(callback, PlaybackState.PREPARING, 0, reference.frame_count)
             socket = self._make_socket()
             socket.bind(self.endpoint)
+            subscriber_connected = self._wait_for_subscriber(socket, stop_event)
+            if not subscriber_connected:
+                return
             interval = 1.0 / reference.fps
             first_message = pack_smpl_ref_message(build_smpl_ref_fields(reference, 0))
             deadline = time.monotonic()
             for _ in range(max(1, int(math.ceil(self.pre_roll_seconds * reference.fps)))):
                 if stop_event.is_set():
                     return
+                subscriber_connected = self._assert_subscriber_active(
+                    socket, subscriber_connected
+                )
                 socket.send(first_message)
                 deadline += interval
                 if self._wait_until(stop_event, deadline):
@@ -340,6 +402,9 @@ class SonicPlaybackController:
             for frame_index in range(reference.frame_count):
                 if stop_event.is_set():
                     return
+                subscriber_connected = self._assert_subscriber_active(
+                    socket, subscriber_connected
+                )
                 socket.send(pack_smpl_ref_message(build_smpl_ref_fields(reference, frame_index)))
                 if frame_index == 0 or (frame_index + 1) % 5 == 0 or frame_index + 1 == reference.frame_count:
                     self._notify(callback, PlaybackState.STREAMING, frame_index + 1, reference.frame_count)
@@ -350,6 +415,9 @@ class SonicPlaybackController:
             for _ in range(max(0, int(math.ceil(self.final_hold_seconds * reference.fps)))):
                 if stop_event.is_set():
                     return
+                subscriber_connected = self._assert_subscriber_active(
+                    socket, subscriber_connected
+                )
                 socket.send(final_message)
                 deadline += interval
                 if self._wait_until(stop_event, deadline):

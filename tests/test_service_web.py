@@ -86,6 +86,81 @@ class PausableSonicController:
         pass
 
 
+class DeferredSonicController:
+    def __init__(self):
+        self.callbacks = []
+
+    def run(self, _client_id, _reference, callback):
+        self.callbacks.append(callback)
+
+    def close(self):
+        pass
+
+
+class StopCallbackSonicController:
+    def __init__(self):
+        self.callback = None
+        self.frame_count = 0
+
+    def run(self, _client_id, reference, callback):
+        from hmr4d.utils.sonic import PlaybackState
+
+        self.callback = callback
+        self.frame_count = reference.frame_count
+        callback(PlaybackState.STREAMING, 1, reference.frame_count, None)
+
+    def stop(self, _client_id):
+        from hmr4d.utils.sonic import PlaybackState
+
+        self.callback(PlaybackState.STOPPED, 0, self.frame_count, None)
+        return True
+
+    def close(self):
+        pass
+
+
+class FakeSimulationManager:
+    def __init__(self):
+        self.state = "stopped"
+        self.isolated_tunnel = True
+
+    def status(self):
+        return {
+            "available": True,
+            "availability_error": None,
+            "state": self.state,
+            "error": None,
+            "ros_domain_id": 73,
+            "simulation_endpoint": "tcp://127.0.0.1:5557",
+            "real_robot_endpoint": "tcp://127.0.0.1:5559",
+            "external_simulation_processes": [],
+            "legacy_real_tunnel_active": False,
+            "isolated_real_tunnel_active": self.isolated_tunnel,
+            "realtime_scheduling_available": False,
+            "warnings": ["simulation timing warning"],
+            "managed_pids": {},
+            "log_paths": {},
+        }
+
+    def assert_can_stream(self, target, *, confirm_real=False):
+        if target == "simulation":
+            return "tcp://127.0.0.1:5557"
+        if target == "real" and confirm_real:
+            return "tcp://127.0.0.1:5559"
+        raise RuntimeError("unsafe target")
+
+    def start(self):
+        self.state = "starting"
+        return self.status()
+
+    def stop(self):
+        self.state = "stopping"
+        return self.status()
+
+    def shutdown(self):
+        self.state = "stopped"
+
+
 class ServiceWebTest(unittest.TestCase):
     def test_artifact_zip_stores_precompressed_binary_without_recompression(self):
         root = Path(self.temp_dir.name)
@@ -118,7 +193,12 @@ class ServiceWebTest(unittest.TestCase):
         )
         self.settings.ensure_runtime_dirs()
         self.store = SQLiteJobStore(self.settings.db_path)
-        self.manager = JobManager(self.settings, self.store)
+        self.simulation = FakeSimulationManager()
+        self.manager = JobManager(
+            self.settings,
+            self.store,
+            simulation_manager=self.simulation,
+        )
         self.app = create_gvhmr_app(self.manager, self.settings, manage_lifecycle=False)
         self.client = TestClient(self.app)
 
@@ -530,23 +610,69 @@ class ServiceWebTest(unittest.TestCase):
         }
         with patch.object(self.manager, "send_to_sonic", return_value=payload) as send:
             response = self.client.post("/jobs/example/to-sonic")
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json(), payload)
-        send.assert_called_once_with("example", speed=1.0)
+        self.assertEqual(response.status_code, 400, response.text)
+        send.assert_not_called()
 
         with patch.object(self.manager, "send_to_sonic", return_value=payload) as send:
-            response = self.client.post("/jobs/example/to-sonic?speed=0.65")
+            response = self.client.post("/jobs/example/to-sonic?confirm_real=true")
         self.assertEqual(response.status_code, 200, response.text)
-        send.assert_called_once_with("example", speed=0.65)
+        self.assertEqual(response.json(), payload)
+        send.assert_called_once_with(
+            "example",
+            speed=1.0,
+            target="real",
+            confirm_real=True,
+        )
 
-        invalid = self.client.post("/jobs/example/to-sonic?speed=0.81")
+        with patch.object(self.manager, "send_to_sonic", return_value=payload) as send:
+            response = self.client.post(
+                "/jobs/example/to-sonic?speed=0.65&confirm_real=true"
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        send.assert_called_once_with(
+            "example",
+            speed=0.65,
+            target="real",
+            confirm_real=True,
+        )
+
+        with patch.object(self.manager, "send_to_sonic", return_value=payload) as send:
+            response = self.client.post("/jobs/example/to-simulation?speed=0.65")
+        self.assertEqual(response.status_code, 200, response.text)
+        send.assert_called_once_with(
+            "example",
+            speed=0.65,
+            target="simulation",
+            confirm_real=False,
+        )
+
+        invalid = self.client.post(
+            "/jobs/example/to-sonic?speed=0.81&confirm_real=true"
+        )
         self.assertEqual(invalid.status_code, 400, invalid.text)
         self.assertIn("Unsupported SONIC speed", invalid.json()["detail"])
 
-        too_slow = self.client.post("/jobs/example/to-sonic?speed=0.2")
+        too_slow = self.client.post(
+            "/jobs/example/to-sonic?speed=0.2&confirm_real=true"
+        )
         self.assertEqual(too_slow.status_code, 400, too_slow.text)
-        too_fast = self.client.post("/jobs/example/to-sonic?speed=1.05")
+        too_fast = self.client.post(
+            "/jobs/example/to-sonic?speed=1.05&confirm_real=true"
+        )
         self.assertEqual(too_fast.status_code, 400, too_fast.text)
+
+    def test_simulation_lifecycle_stops_real_stream_before_start_and_sim_stream_before_stop(self):
+        with patch.object(self.manager, "pause_active_sonic", return_value=None) as pause:
+            started = self.client.post("/api/simulation/start")
+        self.assertEqual(started.status_code, 200, started.text)
+        self.assertEqual(started.json()["state"], "starting")
+        pause.assert_called_once_with(target="real")
+
+        with patch.object(self.manager, "pause_active_sonic", return_value=None) as pause:
+            stopped = self.client.post("/api/simulation/stop")
+        self.assertEqual(stopped.status_code, 200, stopped.text)
+        self.assertEqual(stopped.json()["state"], "stopping")
+        pause.assert_called_once_with(target="simulation")
 
     def test_sonic_speed_slider_exposes_granular_safe_range(self):
         response = self.client.get("/")
@@ -557,6 +683,17 @@ class ServiceWebTest(unittest.TestCase):
         self.assertIn('max="1"', html)
         self.assertIn('step="0.05"', html)
         self.assertNotIn('id="sonicSpeedBtn"', html)
+        self.assertIn('id="startSimulationBtn"', html)
+        self.assertIn('id="toSimulationBtn"', html)
+        self.assertIn('id="toSonicBtn"', html)
+        self.assertIn("发送到真机", html)
+        script = self.client.get("/static/app.js")
+        self.assertEqual(script.status_code, 200, script.text)
+        self.assertIn("Web 外仿真进程，请先关闭", script.text)
+        self.assertIn("external_simulation_processes?.length", script.text)
+        self.assertIn("refreshSonicPlaybackJob", script.text)
+        self.assertIn("sonicPollingJobId", script.text)
+        self.assertIn("state.jobs.some(jobProcessingNeedsPolling)", script.text)
 
     def test_sonic_conversion_is_cached_and_exposed_as_artifacts(self):
         job = self._make_succeeded_job("sonic.mp4")
@@ -576,8 +713,8 @@ class ServiceWebTest(unittest.TestCase):
             "hmr4d.utils.sonic.SonicPlaybackController",
             return_value=controller,
         ):
-            first = self.manager.send_to_sonic(job["job_id"])
-            second = self.manager.send_to_sonic(job["job_id"])
+            first = self.manager.send_to_sonic(job["job_id"], target="simulation")
+            second = self.manager.send_to_sonic(job["job_id"], target="simulation")
 
         self.assertFalse(first["reused"])
         self.assertTrue(second["reused"])
@@ -585,6 +722,7 @@ class ServiceWebTest(unittest.TestCase):
         updated = self.manager.get_job(job["job_id"])
         self.assertEqual(updated["sonic_status"], "complete")
         self.assertEqual(updated["sonic_frame"], first["frames"])
+        self.assertEqual(updated["sonic_target"], "simulation")
         reference = output_dir / "sonic_reference.npz"
         metadata = output_dir / "sonic_conversion.json"
         self.assertEqual(Path(updated["artifacts"]["sonic_reference_path"]), reference)
@@ -598,6 +736,41 @@ class ServiceWebTest(unittest.TestCase):
         with zipfile.ZipFile(updated["artifacts"]["artifacts_zip_path"]) as archive:
             self.assertIn("sonic_reference.npz", archive.namelist())
         self.assertIn("sonic_conversion.json", archive.namelist())
+
+    def test_replaced_sonic_session_cannot_overwrite_new_session_state(self):
+        from hmr4d.utils.sonic import PlaybackState
+
+        job = self._make_succeeded_job("sonic-session-generation.mp4")
+        output_dir = Path(job["output_dir"])
+        frames = 4
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.zeros((frames, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((frames, 63), dtype=torch.float32),
+                }
+            },
+            output_dir / "hmr4d_results.pt",
+        )
+        controller = DeferredSonicController()
+        with patch(
+            "hmr4d.utils.sonic.SonicPlaybackController",
+            return_value=controller,
+        ):
+            self.manager.send_to_sonic(job["job_id"], target="simulation")
+            self.manager.send_to_sonic(job["job_id"], target="simulation")
+
+        self.assertEqual(len(controller.callbacks), 2)
+        controller.callbacks[0](PlaybackState.ERROR, 0, frames, "stale failure")
+        current = self.manager.get_job(job["job_id"])
+        self.assertEqual(current["sonic_status"], "preparing")
+        self.assertIsNone(current["sonic_error"])
+        self.assertEqual(self.manager._sonic_job_id, job["job_id"])
+
+        controller.callbacks[1](PlaybackState.STREAMING, 1, frames, None)
+        current = self.manager.get_job(job["job_id"])
+        self.assertEqual(current["sonic_status"], "streaming")
+        self.assertEqual(current["sonic_frame"], 1)
 
     def test_sonic_slowdown_keeps_50_fps_and_uses_an_isolated_cache(self):
         job = self._make_succeeded_job("sonic-slow.mp4")
@@ -617,9 +790,15 @@ class ServiceWebTest(unittest.TestCase):
             "hmr4d.utils.sonic.SonicPlaybackController",
             return_value=controller,
         ):
-            normal = self.manager.send_to_sonic(job["job_id"], speed=1.0)
-            slow = self.manager.send_to_sonic(job["job_id"], speed=0.65)
-            reused = self.manager.send_to_sonic(job["job_id"], speed=0.65)
+            normal = self.manager.send_to_sonic(
+                job["job_id"], speed=1.0, target="simulation"
+            )
+            slow = self.manager.send_to_sonic(
+                job["job_id"], speed=0.65, target="simulation"
+            )
+            reused = self.manager.send_to_sonic(
+                job["job_id"], speed=0.65, target="simulation"
+            )
 
         self.assertEqual(normal["fps"], 50.0)
         self.assertEqual(slow["fps"], 50.0)
@@ -648,6 +827,7 @@ class ServiceWebTest(unittest.TestCase):
         controller = PausableSonicController()
         self.manager._sonic_controller = controller
         self.manager._sonic_job_id = job["job_id"]
+        self.manager._sonic_target = "simulation"
 
         response = self.client.post(f"/jobs/{job['job_id']}/sonic/pause")
 
@@ -662,6 +842,32 @@ class ServiceWebTest(unittest.TestCase):
 
         repeated = self.client.post(f"/jobs/{job['job_id']}/sonic/pause")
         self.assertEqual(repeated.status_code, 400)
+
+    def test_sonic_pause_discards_stale_stopped_callback(self):
+        job = self._make_succeeded_job("pause-sonic-callback.mp4")
+        output_dir = Path(job["output_dir"])
+        frames = 4
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.zeros((frames, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((frames, 63), dtype=torch.float32),
+                }
+            },
+            output_dir / "hmr4d_results.pt",
+        )
+        controller = StopCallbackSonicController()
+        with patch(
+            "hmr4d.utils.sonic.SonicPlaybackController",
+            return_value=controller,
+        ):
+            self.manager.send_to_sonic(job["job_id"], target="simulation")
+
+        response = self.client.post(f"/jobs/{job['job_id']}/sonic/pause")
+        self.assertEqual(response.status_code, 200, response.text)
+        current = self.manager.get_job(job["job_id"])
+        self.assertEqual(current["sonic_status"], "paused")
+        self.assertIsNone(current["sonic_error"])
 
     def test_capabilities_report_embedded_backend_by_default(self):
         payload = self.client.get("/api/capabilities").json()
