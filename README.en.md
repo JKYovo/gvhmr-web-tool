@@ -2,7 +2,7 @@
 
 [简体中文 README](README.md)
 
-For AI-assisted customer deployment, require the deployment agent to read [README_AI_DEPLOY.md](README_AI_DEPLOY.md) first. The public customer package does not distribute or install Human3R/DINOv2; Human3R is a local private add-on only.
+For AI-assisted customer deployment, require the deployment agent to read [README_AI_DEPLOY.md](README_AI_DEPLOY.md) first. Human3R and some included components are subject to non-commercial license terms and therefore are not distributed, installed, or enabled in commercial customer deployments.
 
 This repository packages the single-person motion recovery pipeline from [GVHMR](https://github.com/zju3dv/GVHMR) as a deployable local Web tool. Source mode includes GVHMR-Enhanced directly: FootMR ankle refinement is the default, with Contact-aware Global Optimizer V1.1 available as the automatic flat-ground constraint.
 
@@ -183,4 +183,4 @@ The optional scene-gravity mode uses Human3R:
 }
 ```
 
-Human3R and some of its upstream components are under non-commercial terms, including CC BY-NC-SA 4.0 and the NAVER Non-Commercial License. Review `third-party/Human3R/LICENSE` and `NOTICE.txt` before enabling it; this integration grants no commercial-use rights.
+Human3R and some included components are under non-commercial terms, including CC BY-NC-SA 4.0 and the NAVER Non-Commercial License, so Human3R is not deployed in the public commercial customer package. It must remain disabled unless the customer separately obtains explicit commercial permission and completes legal review. This integration grants no commercial-use rights.

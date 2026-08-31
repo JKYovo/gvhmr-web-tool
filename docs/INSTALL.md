@@ -32,7 +32,7 @@ python tools/demo/download_footmr_assets.py
 
 ## Human3R 边界
 
-公开客户仓库不分发、不安装 Human3R、DINOv2、Human3R 权重或编译扩展。客户部署不要执行递归 submodule 初始化；缺少 Human3R 时对应 Web 选项禁用属于预期行为。AI 代理必须按 [README_AI_DEPLOY.md](../README_AI_DEPLOY.md) 部署。
+Human3R 仓库及其所含部分组件采用非商业许可证，包括 CC BY-NC-SA 4.0 和 NAVER Non-Commercial License，不允许直接用于本项目的客户商业部署。因此公开客户仓库不分发、不安装、不启用 Human3R、DINOv2、Human3R 权重或编译扩展。客户部署不要执行递归 submodule 初始化；Human3R 选项禁用属于预期行为，不是安装故障。除非客户另行取得明确商业授权并完成法务确认，否则不得启用。AI 代理必须按 [README_AI_DEPLOY.md](../README_AI_DEPLOY.md) 部署。
 
 如果模型已经由 Docker 下载到 `runtime/checkpoints`，也可以通过环境变量复用：
 

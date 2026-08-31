@@ -2,7 +2,7 @@
 
 [English README](README.en.md)
 
-客户服务器由 AI 辅助部署时，先让部署代理完整阅读 [README_AI_DEPLOY.md](README_AI_DEPLOY.md)。公开客户版不分发或安装 Human3R/DINOv2；Human3R 是本机私有可选扩展。
+客户服务器由 AI 辅助部署时，先让部署代理完整阅读 [README_AI_DEPLOY.md](README_AI_DEPLOY.md)。Human3R 仓库及其所含部分组件采用非商业许可证，不允许直接用于本项目的客户商业部署，因此公开客户版不分发、不安装也不启用 Human3R/DINOv2。
 
 把 [GVHMR](https://github.com/zju3dv/GVHMR) 的单人视频人体动作恢复流程封装成一个可部署的本地 Web 工具。源码模式已经内置 GVHMR-Enhanced：默认使用 FootMR 做脚踝细化，并将 Contact-aware Global Optimizer V1.1 作为自动平地约束，不再要求旁路安装 `gvhmr-core-opt`。
 
@@ -232,4 +232,4 @@ Web 不包含 SSH 或真机 launch 命令，也不会启动真机控制器。检
 }
 ```
 
-Human3R 及其部分上游组件采用非商业许可证（包括 CC BY-NC-SA 4.0 和 NAVER Non-Commercial License）。启用该可选项前必须检查 `third-party/Human3R/LICENSE` 和 `NOTICE.txt`；本仓库集成不授予商业使用权。
+Human3R 及其部分上游组件采用非商业许可证（包括 CC BY-NC-SA 4.0 和 NAVER Non-Commercial License），不能直接用于客户商业部署。因此公开仓库不部署 Human3R。除非客户另行取得明确商业授权并完成法务确认，否则不得启用；本仓库集成不授予任何商业使用权。

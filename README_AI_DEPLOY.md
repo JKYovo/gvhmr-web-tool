@@ -6,7 +6,7 @@
 
 部署代理必须遵守以下规则：
 
-1. 不下载、不初始化、不复制、不上传 Human3R、DINOv2 或 `human3r_672S.pth`。公开仓库不交付这些组件；Web 中 Human3R 选项显示不可用属于正常状态。
+1. Human3R 仓库及其所含部分组件受 CC BY-NC-SA 4.0、NAVER Non-Commercial License 等非商业条款约束，不允许直接用于本项目的客户商业部署。因此禁止下载、初始化、复制、上传或启用 Human3R、DINOv2 和 `human3r_672S.pth`。公开仓库不交付这些组件；Web 中 Human3R 选项显示不可用属于正常状态。只有客户另行取得明确的商业授权并完成法务确认后，才能重新评估，AI 不得自行判断为可商用。
 2. 不索取或记录 Hugging Face token、GitHub token、SSH 私钥、机器人密钥等秘密。若私有仓库认证确有需要，让客户在自己的终端完成登录。
 3. 不执行 `git submodule update --init --recursive`。默认 FootMR + SimpleVO 路径不需要 Human3R 子模块。
 4. 不删除或覆盖已有的 `runtime/`、任务、数据库和 checkpoint。升级前必须备份，所有新部署先使用独立目录。
@@ -61,7 +61,7 @@ conda run -n gvhmr python -m hmr4d.service.assets \
 conda run -n gvhmr python tools/demo/download_footmr_assets.py
 ```
 
-不要执行任何包含 `Human3R`、`dinov2`、`HUMAN3R_PYTHON` 或 `HUMAN3R_MODEL_PATH` 的安装命令。
+不要执行任何包含 `Human3R`、`dinov2`、`HUMAN3R_PYTHON` 或 `HUMAN3R_MODEL_PATH` 的安装命令。其未部署原因是非商业许可证限制，不是遗漏、下载失败或环境故障。
 
 启动：
 
@@ -97,7 +97,7 @@ bash status_web_source.sh
 - `health.status` 为 `ok`。
 - `runtime.inference_backend` 为 `external_core`，并且 `runtime.inference_ready` 为 `true`。
 - `flat_y` 和 `gravity_flat` 为 enabled。
-- `human3r` 为 disabled；这是公开客户版的预期结果，不得为了消除该提示私自安装 Human3R。
+- `human3r` 为 disabled；这是许可证要求下的公开客户版预期结果，不得为了消除该提示私自安装 Human3R。
 - 页面可打开，上传区明确显示输入会规范化为 30 FPS。
 - 使用客户授权的短视频完成一次测试；最终任务目录至少包含 `0_input_video.mp4`、`hmr4d_results.pt` 和 `job.json`。
 - 成功任务不应残留 `submitted_input.*` 或 `preprocess/`；调试文件应位于 `diagnostics/`。
