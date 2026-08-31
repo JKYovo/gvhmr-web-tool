@@ -221,6 +221,10 @@ def _artifact_path(job, artifact_key):
         "global_contact_results": artifacts.get("global_contact_results_path"),
         "flat_ground_y_results": artifacts.get("flat_ground_y_results_path"),
         "ground_constraint_metrics": artifacts.get("ground_constraint_metrics_path"),
+        "gravity_source": artifacts.get("gravity_source_path"),
+        "gravity_alignment_metrics": artifacts.get("gravity_alignment_metrics_path"),
+        "human3r_ground_overlay": artifacts.get("human3r_ground_overlay_path"),
+        "human3r_run_metadata": artifacts.get("human3r_run_metadata_path"),
         "sonic_reference": artifacts.get("sonic_reference_path"),
         "sonic_metadata": artifacts.get("sonic_metadata_path"),
         "incam_video": artifacts.get("incam_video_path"),
@@ -331,6 +335,49 @@ def _ground_constraint_capabilities(runtime):
         and root is not None
         and (root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py").is_file()
     )
+    gravity_available = bool(
+        flat_y_available
+        and (root / "tools" / "bench" / "human3r_p2y" / "apply_scene_gravity.py").is_file()
+        and (root / "tools" / "bench" / "human3r_p2y" / "estimate_standing_gravity.py").is_file()
+    )
+    human3r_python = Path(
+        os.environ.get(
+            "HUMAN3R_PYTHON",
+            "/home/user-kevien/miniforge3/envs/human3r/bin/python",
+        )
+    ).expanduser()
+    human3r_model = (
+        Path(os.environ["HUMAN3R_MODEL_PATH"]).expanduser()
+        if os.environ.get("HUMAN3R_MODEL_PATH")
+        else (root / "inputs" / "human3r_assets" / "human3r_672S.pth" if root else None)
+    )
+    curope_extension = (
+        next(
+            (root / "third-party" / "Human3R" / "src" / "croco" / "models" / "curope").glob(
+                "curope*.so"
+            ),
+            None,
+        )
+        if root
+        else None
+    )
+    human3r_requirements = (
+        human3r_python,
+        human3r_model,
+        root / "third-party" / "Human3R" / "demo.py" if root else None,
+        root / "third-party" / "dinov2" / "hubconf.py" if root else None,
+        root / "tools" / "bench" / "human3r_p2y" / "run_human3r_headless.py" if root else None,
+        root / "tools" / "bench" / "human3r_p2y" / "extract_ground_plane.py" if root else None,
+        root / "runtime" / "checkpoints" / "body_models" / "smplx" / "SMPLX_NEUTRAL.npz"
+        if root
+        else None,
+        root / "hmr4d" / "network" / "hmr2" / "configs" / "smpl_mean_params.npz"
+        if root
+        else None,
+        curope_extension,
+    )
+    human3r_missing = [str(path) for path in human3r_requirements if path is None or not path.is_file()]
+    human3r_available = bool(gravity_available and not human3r_missing)
     return {
         "default": "flat_y" if flat_y_available else "none",
         "options": [
@@ -341,10 +388,20 @@ def _ground_constraint_capabilities(runtime):
                 "enabled": flat_y_available,
             },
             {
+                "value": "gravity_flat",
+                "label": "重力校正 + 自动平地（站立帧自标定）",
+                "enabled": gravity_available,
+                **({"reason": "缺少重力校正脚本"} if not gravity_available else {}),
+            },
+            {
                 "value": "human3r",
-                "label": "Human3R 场景约束",
-                "enabled": False,
-                "reason": "尚未启用",
+                "label": "Human3R 场景重力 + 自动平地",
+                "enabled": human3r_available,
+                **(
+                    {"reason": "缺少 Human3R 运行依赖", "missing": human3r_missing}
+                    if not human3r_available
+                    else {}
+                ),
             },
         ],
     }

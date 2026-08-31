@@ -30,6 +30,10 @@ python -m hmr4d.service.assets --checkpoint-root inputs/checkpoints
 python tools/demo/download_footmr_assets.py
 ```
 
+## Human3R 边界
+
+公开客户仓库不分发、不安装 Human3R、DINOv2、Human3R 权重或编译扩展。客户部署不要执行递归 submodule 初始化；缺少 Human3R 时对应 Web 选项禁用属于预期行为。AI 代理必须按 [README_AI_DEPLOY.md](../README_AI_DEPLOY.md) 部署。
+
 如果模型已经由 Docker 下载到 `runtime/checkpoints`，也可以通过环境变量复用：
 
 ```bash

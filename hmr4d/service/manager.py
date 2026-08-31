@@ -22,7 +22,7 @@ from hmr4d.service.simulation import SimulationManager
 
 
 _PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})%")
-GROUND_CONSTRAINTS = {"none", "flat_y", "human3r"}
+GROUND_CONSTRAINTS = {"none", "flat_y", "gravity_flat", "human3r"}
 SONIC_SPEED_MIN = 0.25
 SONIC_SPEED_MAX = 1.0
 SONIC_SPEED_STEP = 0.05
@@ -32,8 +32,13 @@ def _normalize_ground_constraint(value):
     value = str(value or "none").strip().lower()
     if value not in GROUND_CONSTRAINTS:
         raise ValueError(f"Unsupported ground constraint: {value}")
-    if value == "human3r":
-        raise ValueError("Human3R scene constraint is not enabled yet.")
+    return value
+
+
+def _validate_ground_constraint(value, *, static_cam):
+    value = _normalize_ground_constraint(value)
+    if value in {"gravity_flat", "human3r"} and not static_cam:
+        raise ValueError(f"{value} requires the static camera option")
     return value
 
 
@@ -97,6 +102,12 @@ def _progress_from_log(message, task_kind):
         return 95, "加载动作模型", False
     if "[hmr4d] elapsed" in lower:
         return 98, "动作恢复完成", False
+    if "[human3r]" in lower:
+        return 96, "Human3R 场景重建", False
+    if "[human3r ground]" in lower:
+        return 98, "提取场景地面", False
+    if "[standing gravity]" in lower or "[gravity alignment]" in lower:
+        return 98, "校正全局重力", False
     if "[ground constraint]" in lower:
         return 99, "应用地面约束", False
     if "[orientation guard]" in lower:
@@ -212,7 +223,9 @@ class JobManager:
         video_source = Path(video_source).expanduser().resolve()
         if not video_source.exists():
             raise FileNotFoundError(f"Video not found at {video_source}")
-        ground_constraint = _normalize_ground_constraint(ground_constraint)
+        ground_constraint = _validate_ground_constraint(
+            ground_constraint, static_cam=bool(static_cam)
+        )
 
         job_id = make_job_id()
         custom_output_dir = bool(str(output_dir or "").strip())
@@ -237,6 +250,7 @@ class JobManager:
             "save_intermediate": bool(save_intermediate),
             "generate_preview": bool(generate_preview),
             "ground_constraint": ground_constraint,
+            "ground_constraint_effective_mode": ground_constraint,
             "ground_constraint_status": "pending" if ground_constraint != "none" else "not_requested",
             "ground_constraint_error": None,
             "ground_constraint_fallback_reason": None,
@@ -273,6 +287,9 @@ class JobManager:
         output_dir=None,
         display_names=None,
     ):
+        ground_constraint = _validate_ground_constraint(
+            ground_constraint, static_cam=bool(static_cam)
+        )
         batch_id = make_batch_id()
         batch_dir = ensure_dir(self.settings.batch_root / batch_id)
         total = len(video_sources)
@@ -385,6 +402,7 @@ class JobManager:
         job["ground_constraint_error"] = None
         job["ground_constraint_fallback_reason"] = None
         job["ground_constraint_warning"] = None
+        job["ground_constraint_effective_mode"] = job.get("ground_constraint", "none")
         job["cancel_requested"] = False
         job["preview_status"] = "not_requested"
         job["preview_error_summary"] = None
@@ -474,12 +492,13 @@ class JobManager:
         if not source.is_file():
             raise FileNotFoundError(f"Missing inference result at {source}")
         speed_tag = f"{speed:.2f}".rstrip("0").rstrip(".").replace(".", "_")
+        export_dir = ensure_dir(output_dir / "exports")
         if speed == 1.0:
-            reference_path = output_dir / "sonic_reference.npz"
-            metadata_path = output_dir / "sonic_conversion.json"
+            reference_path = export_dir / "sonic_reference.npz"
+            metadata_path = export_dir / "sonic_conversion.json"
         else:
-            reference_path = output_dir / f"sonic_reference_speed_{speed_tag}.npz"
-            metadata_path = output_dir / f"sonic_conversion_speed_{speed_tag}.json"
+            reference_path = export_dir / f"sonic_reference_speed_{speed_tag}.npz"
+            metadata_path = export_dir / f"sonic_conversion_speed_{speed_tag}.json"
         effective_source_fps = 30.0 * speed
         source_digest = sha256(source)
         metadata = None
@@ -710,6 +729,21 @@ class JobManager:
                 job[key] = latest[key]
         return job
 
+    def _adopt_processed_input(self, job, result):
+        """Use the normalized video as the durable input and remove its staging copy."""
+        processed = Path(result.get("input_video_path") or "")
+        if not processed.is_file():
+            return
+        staged = Path(job.get("input_video") or "")
+        job["input_video"] = str(processed)
+        output_dir = Path(job["output_dir"])
+        if (
+            staged != processed
+            and staged.parent == output_dir
+            and staged.name.startswith("submitted_input.")
+        ):
+            staged.unlink(missing_ok=True)
+
     def _ensure_preview_input(self, job, runner):
         output_dir = Path(job["output_dir"])
         normalized_video = output_dir / "0_input_video.mp4"
@@ -744,29 +778,38 @@ class JobManager:
             log_callback=self._log_callback(job["job_id"]),
         )
         self._merge_live_job_fields(job)
+        self._adopt_processed_input(job, result)
         job["artifacts"].update(
             {key: value for key, value in result.items() if key.endswith("_path")}
         )
-        if "ground_constraint_status" in result:
-            job["ground_constraint_status"] = result["ground_constraint_status"]
-        if "ground_constraint_error" in result:
-            job["ground_constraint_error"] = result["ground_constraint_error"]
-        if "ground_constraint_fallback_reason" in result:
-            job["ground_constraint_fallback_reason"] = result[
-                "ground_constraint_fallback_reason"
-            ]
+        for key in (
+            "ground_constraint_status",
+            "ground_constraint_effective_mode",
+            "ground_constraint_error",
+            "ground_constraint_fallback_reason",
+            "ground_constraint_warning",
+        ):
+            if key in result:
+                job[key] = result[key]
 
     def _build_artifact_map(self, job):
         output_dir = Path(job["output_dir"])
-        constraint_dir = output_dir / "ground_constraint_global_v1_1"
+        diagnostics_dir = output_dir / "diagnostics"
+        constraint_dir = diagnostics_dir / "ground_constraint" / "contact_global_v1_1"
         constraint_result = constraint_dir / "contact_global_root_hmr4d_results.pt"
         constraint_metrics = constraint_dir / "metrics.json"
+        if not constraint_result.is_file():
+            constraint_dir = output_dir / "ground_constraint_global_v1_1"
+            constraint_result = constraint_dir / "contact_global_root_hmr4d_results.pt"
+            constraint_metrics = constraint_dir / "metrics.json"
         legacy_constraint_dir = output_dir / "ground_constraint_flat_y"
         legacy_constraint_result = legacy_constraint_dir / "contact_floor_y_hmr4d_results.pt"
         if not legacy_constraint_result.is_file():
             legacy_constraint_result = legacy_constraint_dir / "flat_ground_y_hmr4d_results.pt"
         legacy_constraint_metrics = legacy_constraint_dir / "metrics.json"
-        orientation_dir = output_dir / "orientation_guard"
+        orientation_dir = diagnostics_dir / "orientation_guard"
+        if not orientation_dir.is_dir():
+            orientation_dir = output_dir / "orientation_guard"
         if not constraint_metrics.is_file() and legacy_constraint_metrics.is_file():
             constraint_metrics = legacy_constraint_metrics
         existing = {
@@ -778,7 +821,11 @@ class JobManager:
             "job_json_path": str(output_dir / "job.json"),
             "input_video_path": str(output_dir / "0_input_video.mp4"),
             "hmr4d_results_path": str(output_dir / "hmr4d_results.pt"),
-            "raw_hmr4d_results_path": str(output_dir / "hmr4d_results_raw.pt"),
+            "raw_hmr4d_results_path": str(
+                diagnostics_dir / "source" / "hmr4d_results_raw.pt"
+                if (diagnostics_dir / "source" / "hmr4d_results_raw.pt").is_file()
+                else output_dir / "hmr4d_results_raw.pt"
+            ),
             "global_contact_results_path": str(constraint_result),
             "flat_ground_y_results_path": str(legacy_constraint_result),
             "ground_constraint_metrics_path": str(constraint_metrics),
@@ -789,13 +836,49 @@ class JobManager:
                 orientation_dir / "orientation_guard_hmr4d_results.pt"
             ),
             "orientation_guard_metrics_path": str(orientation_dir / "metrics.json"),
-            "long_video_manifest_path": str(output_dir / "long_video" / "manifest.json"),
-            "long_video_metrics_path": str(output_dir / "long_video" / "metrics.json"),
-            "sonic_reference_path": str(output_dir / "sonic_reference.npz"),
-            "sonic_metadata_path": str(output_dir / "sonic_conversion.json"),
-            "incam_video_path": str(output_dir / "1_incam.mp4"),
-            "global_video_path": str(output_dir / "2_global.mp4"),
-            "preview_video_path": str(output_dir / f"{output_dir.name}_3_incam_global_horiz.mp4"),
+            "long_video_manifest_path": str(
+                diagnostics_dir / "long_video" / "manifest.json"
+                if (diagnostics_dir / "long_video" / "manifest.json").is_file()
+                else output_dir / "long_video" / "manifest.json"
+            ),
+            "long_video_metrics_path": str(
+                diagnostics_dir / "long_video" / "metrics.json"
+                if (diagnostics_dir / "long_video" / "metrics.json").is_file()
+                else output_dir / "long_video" / "metrics.json"
+            ),
+            "gravity_source_path": str(
+                diagnostics_dir / "ground_constraint" / "gravity_alignment" / "standing_gravity.json"
+                if (diagnostics_dir / "ground_constraint" / "gravity_alignment" / "standing_gravity.json").is_file()
+                else diagnostics_dir / "ground_constraint" / "human3r_scene" / "ground_plane.json"
+            ),
+            "gravity_alignment_metrics_path": str(diagnostics_dir / "ground_constraint" / "gravity_alignment" / "metrics.json"),
+            "human3r_ground_overlay_path": str(diagnostics_dir / "ground_constraint" / "human3r_scene" / "ground_overlay.png"),
+            "human3r_run_metadata_path": str(diagnostics_dir / "ground_constraint" / "human3r_scene" / "run_metadata.json"),
+            "sonic_reference_path": str(
+                output_dir / "exports" / "sonic_reference.npz"
+                if (output_dir / "exports" / "sonic_reference.npz").is_file()
+                else output_dir / "sonic_reference.npz"
+            ),
+            "sonic_metadata_path": str(
+                output_dir / "exports" / "sonic_conversion.json"
+                if (output_dir / "exports" / "sonic_conversion.json").is_file()
+                else output_dir / "sonic_conversion.json"
+            ),
+            "incam_video_path": str(
+                output_dir / "preview" / "incam.mp4"
+                if (output_dir / "preview" / "incam.mp4").is_file()
+                else output_dir / "1_incam.mp4"
+            ),
+            "global_video_path": str(
+                output_dir / "preview" / "global.mp4"
+                if (output_dir / "preview" / "global.mp4").is_file()
+                else output_dir / "2_global.mp4"
+            ),
+            "preview_video_path": str(
+                output_dir / "preview" / "comparison.mp4"
+                if (output_dir / "preview" / "comparison.mp4").is_file()
+                else output_dir / f"{output_dir.name}_3_incam_global_horiz.mp4"
+            ),
             "artifacts_zip_path": str(output_dir / "artifacts.zip"),
         }
         for key, value in artifact_map.items():
@@ -808,58 +891,27 @@ class JobManager:
         job["artifacts"] = self._build_artifact_map(job)
         self.store.save_job(job)
         output_dir = Path(job["output_dir"])
+        artifacts = job.get("artifacts", {})
         files = [
             (output_dir / "job.json", "job.json"),
             (output_dir / "hmr4d_results.pt", "hmr4d_results.pt"),
-            (output_dir / "hmr4d_results_raw.pt", "hmr4d_results_raw.pt"),
             (
-                output_dir / "ground_constraint_global_v1_1" / "contact_global_root_hmr4d_results.pt",
-                "ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt",
+                Path(artifacts.get("ground_constraint_metrics_path") or output_dir / ".missing_ground_metrics"),
+                "diagnostics/ground_constraint_metrics.json",
             ),
             (
-                output_dir / "ground_constraint_global_v1_1" / "metrics.json",
-                "ground_constraint_global_v1_1/metrics.json",
+                Path(artifacts.get("gravity_source_path") or output_dir / ".missing_gravity_source"),
+                "diagnostics/gravity_source.json",
             ),
             (
-                output_dir / "orientation_guard" / "original_hmr4d_results.pt",
-                "orientation_guard/original_hmr4d_results.pt",
+                Path(artifacts.get("gravity_alignment_metrics_path") or output_dir / ".missing_gravity_metrics"),
+                "diagnostics/gravity_alignment_metrics.json",
             ),
-            (
-                output_dir / "orientation_guard" / "orientation_guard_hmr4d_results.pt",
-                "orientation_guard/orientation_guard_hmr4d_results.pt",
-            ),
-            (
-                output_dir / "orientation_guard" / "metrics.json",
-                "orientation_guard/metrics.json",
-            ),
-            (output_dir / "long_video" / "manifest.json", "long_video/manifest.json"),
-            (output_dir / "long_video" / "metrics.json", "long_video/metrics.json"),
-            (
-                output_dir / "ground_constraint_flat_y" / "contact_floor_y_hmr4d_results.pt",
-                "ground_constraint_flat_y/contact_floor_y_hmr4d_results.pt",
-            ),
-            (
-                output_dir / "ground_constraint_flat_y" / "flat_ground_y_hmr4d_results.pt",
-                "ground_constraint_flat_y/flat_ground_y_hmr4d_results.pt",
-            ),
-            (
-                output_dir / "ground_constraint_flat_y" / "metrics.json",
-                "ground_constraint_flat_y/metrics.json",
-            ),
-            (output_dir / "1_incam.mp4", "1_incam.mp4"),
-            (output_dir / "2_global.mp4", "2_global.mp4"),
-            (
-                Path(job.get("artifacts", {}).get("sonic_reference_path", output_dir / "sonic_reference.npz")),
-                Path(job.get("artifacts", {}).get("sonic_reference_path", "sonic_reference.npz")).name,
-            ),
-            (
-                Path(job.get("artifacts", {}).get("sonic_metadata_path", output_dir / "sonic_conversion.json")),
-                Path(job.get("artifacts", {}).get("sonic_metadata_path", "sonic_conversion.json")).name,
-            ),
-            (
-                output_dir / f"{output_dir.name}_3_incam_global_horiz.mp4",
-                f"{output_dir.name}_3_incam_global_horiz.mp4",
-            ),
+            (Path(artifacts.get("human3r_ground_overlay_path") or output_dir / ".missing_ground_overlay"), "diagnostics/human3r_ground_overlay.png"),
+            (Path(artifacts.get("human3r_run_metadata_path") or output_dir / ".missing_human3r_metadata"), "diagnostics/human3r_run_metadata.json"),
+            (Path(artifacts.get("sonic_reference_path") or output_dir / ".missing_sonic_reference"), "exports/sonic_reference.npz"),
+            (Path(artifacts.get("sonic_metadata_path") or output_dir / ".missing_sonic_metadata"), "exports/sonic_conversion.json"),
+            (Path(artifacts.get("preview_video_path") or output_dir / ".missing_preview"), "preview/comparison.mp4"),
         ]
         if any(Path(path).is_file() for path, _arcname in files[1:]):
             zip_path = zip_artifacts(output_dir / "artifacts.zip", files)
@@ -918,21 +970,19 @@ class JobManager:
                         log_callback=self._log_callback(job_id, "process"),
                     )
                     self._merge_live_job_fields(job)
+                    self._adopt_processed_input(job, result)
                     job["artifacts"].update(
                         {key: value for key, value in result.items() if key.endswith("_path")}
                     )
-                    if "ground_constraint_status" in result:
-                        job["ground_constraint_status"] = result["ground_constraint_status"]
-                    if "ground_constraint_error" in result:
-                        job["ground_constraint_error"] = result["ground_constraint_error"]
-                    if "ground_constraint_fallback_reason" in result:
-                        job["ground_constraint_fallback_reason"] = result[
-                            "ground_constraint_fallback_reason"
-                        ]
-                    if "ground_constraint_warning" in result:
-                        job["ground_constraint_warning"] = result[
-                            "ground_constraint_warning"
-                        ]
+                    for key in (
+                        "ground_constraint_status",
+                        "ground_constraint_effective_mode",
+                        "ground_constraint_error",
+                        "ground_constraint_fallback_reason",
+                        "ground_constraint_warning",
+                    ):
+                        if key in result:
+                            job[key] = result[key]
                     if job.get("cancel_requested"):
                         job["status"] = "cancelled"
                         job["finished_at"] = utc_now_iso()

@@ -2,6 +2,8 @@
 
 [简体中文 README](README.md)
 
+For AI-assisted customer deployment, require the deployment agent to read [README_AI_DEPLOY.md](README_AI_DEPLOY.md) first. The public customer package does not distribute or install Human3R/DINOv2; Human3R is a local private add-on only.
+
 This repository packages the single-person motion recovery pipeline from [GVHMR](https://github.com/zju3dv/GVHMR) as a deployable local Web tool. Source mode includes GVHMR-Enhanced directly: FootMR ankle refinement is the default, with Contact-aware Global Optimizer V1.1 available as the automatic flat-ground constraint.
 
 ![GVHMR Web interface](docs/images/gvhmr-web.png)
@@ -11,8 +13,8 @@ This repository packages the single-person motion recovery pipeline from [GVHMR]
 - Single and batch upload for `mp4 / mov / avi / mkv / webm`
 - Static-camera mode and optional focal length `f_mm`
 - FootMR COCO23 ankle residual refinement with isolated preprocessing caches
-- Optional Contact Global V1.1 flat-ground constraint using continuous toe/heel contacts and a sequence-wide root XYZ solve
-- Human3R scene constraints remain disabled in the Web UI
+- Four ground modes: disabled, Contact Global V1.1, standing-calibrated gravity plus Global V1.1, and Human3R scene gravity plus Global V1.1
+- Human3R compatibility remains a local private add-on; its source, submodules, weights, and compiled artifacts are not distributed in the public customer repository
 - SQLite-backed job history, filtering, cancellation, and retry
 - On-demand previews whose failures do not invalidate motion results
 - In-page preview playback and separate PT, camera-view, global-view, and ZIP downloads
@@ -67,16 +69,21 @@ Each task is stored under:
 runtime/jobs/<video-name>_<short-job-id>/
 ```
 
-Core artifacts:
+New jobs use a compact, stable layout:
 
-- `hmr4d_results.pt`: published result; Global V1.1 when enabled and accepted by its guardrails, otherwise raw FootMR
-- `hmr4d_results_raw.pt`: preserved raw FootMR result when the constraint is enabled
-- `ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt`: accepted V1.1 candidate
-- `ground_constraint_global_v1_1/metrics.json`: contacts, corrections, guardrails, and final decision
-- `job.json`: job summary
-- `artifacts.zip`: bundle of currently available outputs
+```text
+job/
+├── 0_input_video.mp4
+├── hmr4d_results.pt
+├── job.json
+├── artifacts.zip
+├── preview/
+├── exports/
+├── diagnostics/
+└── .work/
+```
 
-The automatic constraint runs once from the raw FootMR tensor and only changes `smpl_params_global.transl`; the former local-Y postprocessor is no longer chained into new tasks. A V1.1 failure or guardrail rejection falls back directly to `hmr4d_results_raw.pt`. The UI/API value remains `flat_y` for compatibility, but now denotes Global V1.1.
+`hmr4d_results.pt` is always the published result. Raw tensors, candidates, metrics, and inspection images live under `diagnostics/`; Human3R per-frame reconstruction is temporary and is deleted after ground extraction by default. The ZIP and Web download list expose only final results and concise diagnostics. `gravity_flat` may fall back once to `flat_y` when no reliable standing segment exists and records the reason. `human3r` does not silently fall back. The compatibility API value `flat_y` denotes Global V1.1.
 
 ## SONIC integration without Kimodo
 
@@ -115,11 +122,11 @@ receipt. Start SONIC/MuJoCo before clicking the button.
 
 On-demand previews:
 
-- `1_incam.mp4`
-- `2_global.mp4`
-- `*_3_incam_global_horiz.mp4`
+- `preview/incam.mp4`
+- `preview/global.mp4`
+- `preview/comparison.mp4`
 
-`submitted_input.*`, `0_input_video.mp4`, and `_gvhmr_work/` are task inputs or working files rather than stable interchange formats.
+`submitted_input.*` and `preprocess/` are temporary and removed after success. `0_input_video.mp4` is the normalized durable input, but is not a stable interchange format.
 
 ## Documentation
 
@@ -164,3 +171,16 @@ FootMR is used by the default enhanced source backend:
   year      = {2026}
 }
 ```
+
+The optional scene-gravity mode uses Human3R:
+
+```bibtex
+@article{chen2025human3r,
+  title={Human3R: Everyone Everywhere All at Once},
+  author={Chen, Yue and Chen, Xingyu and Xue, Yuxuan and Chen, Anpei and Xiu, Yuliang and Gerard, Pons-Moll},
+  journal={arXiv preprint arXiv:2510.06219},
+  year={2025}
+}
+```
+
+Human3R and some of its upstream components are under non-commercial terms, including CC BY-NC-SA 4.0 and the NAVER Non-Commercial License. Review `third-party/Human3R/LICENSE` and `NOTICE.txt` before enabling it; this integration grants no commercial-use rights.

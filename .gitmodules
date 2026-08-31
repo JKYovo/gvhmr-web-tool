@@ -4,12 +4,6 @@
 [submodule "third-party/sapiens"]
 	path = third-party/sapiens
 	url = https://github.com/facebookresearch/sapiens.git
-[submodule "third-party/Human3R"]
-	path = third-party/Human3R
-	url = https://github.com/fanegg/Human3R.git
-[submodule "third-party/dinov2"]
-	path = third-party/dinov2
-	url = https://github.com/facebookresearch/dinov2.git
 [submodule "third-party/CoTracker"]
 	path = third-party/CoTracker
 	url = https://github.com/facebookresearch/co-tracker.git

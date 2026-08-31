@@ -2,6 +2,8 @@
 
 [English README](README.en.md)
 
+客户服务器由 AI 辅助部署时，先让部署代理完整阅读 [README_AI_DEPLOY.md](README_AI_DEPLOY.md)。公开客户版不分发或安装 Human3R/DINOv2；Human3R 是本机私有可选扩展。
+
 把 [GVHMR](https://github.com/zju3dv/GVHMR) 的单人视频人体动作恢复流程封装成一个可部署的本地 Web 工具。源码模式已经内置 GVHMR-Enhanced：默认使用 FootMR 做脚踝细化，并将 Contact-aware Global Optimizer V1.1 作为自动平地约束，不再要求旁路安装 `gvhmr-core-opt`。
 
 ![GVHMR Web 界面](docs/images/gvhmr-web.png)
@@ -12,13 +14,13 @@
 - 单视频与批量上传，支持 `mp4 / mov / avi / mkv / webm`；输入统一按时间戳转为 30 FPS，奇数宽高会无损补齐至偶数
 - 静态相机和可选焦距 `f_mm`
 - FootMR COCO23 脚踝残差细化，以及隔离的预处理缓存
-- 可选 Contact Global V1.1 自动平地约束：按 toe/heel 接触连续置信度整段优化 root XYZ
+- 四档地面处理：不启用、Contact Global V1.1 自动平地、站立帧重力校正 + 自动平地、Human3R 场景重力 + 自动平地
 - 默认严格检查 global/incam 同步出现的孤立极端朝向跳变，只重分配短窗口 root 转速
-- Human3R 场景约束代码已纳入实验工具，但 Web 中暂不启用
+- Human3R 接口仅作为本机私有扩展保留；公开客户仓库不分发其源码、子模块、权重或编译产物
 - SQLite 任务持久化、状态筛选、取消和失败重试
 - 长视频整段精确 local attention、内存受控共享裁剪和极端 OOM 断点续跑
 - 推理完成后按需生成预览，预览失败不会破坏人体动作结果
-- 页面内播放预览，并分别下载 PT、相机视角、全局视角或 ZIP
+- 页面内播放预览；下载列表默认只显示最终 PT、SONIC 数据、对比预览、Human3R 地面检查图和精简 ZIP
 - Web 可一键启动/关闭本机 MuJoCo，并把同一任务发送到隔离的仿真 SONIC；仿真和真机链路由后端强制互斥
 - 上传临时文件自动清理，任务输入和结果统一保存在任务目录
 - Docker 优先的一键部署，以及供开发者使用的源码模式
@@ -88,7 +90,7 @@ features 后自动删除。静态相机后处理中的未来帧重复更新也�
 - 曾测试加快输入 H.264 转码，但 qhy 的 body P95 变化约 `1.3°`、global root P95
   变化约 `2.3 cm`，因此没有采用。当前不会用降低输入质量换速度。
 
-长视频任务会额外保存 `long_video/manifest.json` 和 `long_video/metrics.json`，记录
+长视频任务会额外保存 `diagnostics/long_video/manifest.json` 和 `diagnostics/long_video/metrics.json`，记录
 实际模式、模型身份、耗时以及是否发生 OOM 窗口回退。完整实验和风险边界见
 [优化记录 P28](docs/OPTIMIZATION_LOG.md#p28长视频精确推理内存上界与非模型产物加速)。
 
@@ -100,19 +102,23 @@ features 后自动删除。静态相机后处理中的未来帧重复更新也�
 runtime/jobs/<视频名>_<任务短 ID>/
 ```
 
-核心产物：
+新任务使用固定目录结构，任务根目录只保留用户真正需要识别的入口文件：
 
-- `hmr4d_results.pt`：当前发布结果；FootMR 及可选 Global V1.1 完成后，再经过严格孤立朝向跳变检查
-- `hmr4d_results_raw.pt`：启用自动平地时保留的原始 FootMR 结果
-- `ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt`：通过保护条件的 V1.1 候选
-- `ground_constraint_global_v1_1/metrics.json`：接触、修正量、保护条件和最终决策
-- `orientation_guard/metrics.json`：朝向峰值、触发边界、阈值和修复前后角速度
-- `orientation_guard/original_hmr4d_results.pt`、`orientation_guard/orientation_guard_hmr4d_results.pt`：仅实际触发时保存的修复前后 tensor
-- `long_video/manifest.json`、`long_video/metrics.json`：长视频推理模式、模型身份和耗时
-- `job.json`：任务摘要
-- `artifacts.zip`：当前可用结果的打包文件
+```text
+任务目录/
+├── 0_input_video.mp4
+├── hmr4d_results.pt
+├── job.json
+├── artifacts.zip
+├── preview/                  # 按需生成
+├── exports/                  # 按需生成 SONIC 文件
+├── diagnostics/              # raw、指标和检查图
+└── .work/                    # 仅保留中间文件时使用
+```
 
-自动平地从原始 FootMR tensor 单次运行，只修改 `smpl_params_global.transl`，不会再串联旧 local-Y 后处理。按当前发布策略，保护项未通过但候选完整时仍发布约束结果并在任务详情显示诊断警告；脚本异常、候选缺失或 metrics 损坏会直接使任务失败，不再静默回退 raw。`hmr4d_results_raw.pt` 仍保留供下载和人工对照。页面/API 为兼容现有调用仍使用 `flat_y` 选项值，但它现在表示 Global V1.1。
+`hmr4d_results.pt` 始终是最终发布结果。原始 FootMR tensor、接触优化候选、重力指标和朝向检查统一移入 `diagnostics/`；Human3R 的逐帧 `depth/conf/color/camera/smpl` 只在 `.work/` 临时存在，默认在提取地面后删除。`artifacts.zip` 不再打包 raw/candidate 或单独的 incam/global 调试视频，只包含最终结果和少量摘要。
+
+自动平地从原始 FootMR tensor 单次运行，只修改 `smpl_params_global.transl`。`gravity_flat` 先用可靠站立帧估计重力；找不到可靠站立段时会记录原因并只回退一次 `flat_y`。`human3r` 从场景地面估计重力，不回退到其他模式。保护项未通过但候选完整时仍发布约束结果并显示诊断警告；脚本异常、候选缺失或 metrics 损坏会使任务失败。页面/API 为兼容现有调用仍使用 `flat_y` 表示 Global V1.1。
 
 孤立朝向保护位于地面约束之后，只在 global 单帧转角至少 `80°`、incam 同一边界至少 `75°`，且峰值相对邻域高度显著、附近没有第二个同级峰值时触发。修复使用端点固定的 SO(3) 短窗口平滑，只修改 `global_orient`；正常转身、`body_pose`、`transl` 和 `betas` 不参与平滑。未触发的任务只保存 metrics，不复制额外 tensor。
 
@@ -163,11 +169,11 @@ Web 不包含 SSH 或真机 launch 命令，也不会启动真机控制器。检
 
 按需生成的预览：
 
-- `1_incam.mp4`
-- `2_global.mp4`
-- `*_3_incam_global_horiz.mp4`
+- `preview/incam.mp4`
+- `preview/global.mp4`
+- `preview/comparison.mp4`
 
-`submitted_input.*`、`0_input_video.mp4` 和 `_gvhmr_work/` 属于任务输入或中间文件，不是稳定的数据交换格式。
+`submitted_input.*` 和 `preprocess/` 只在任务执行期间使用，成功后删除；`0_input_video.mp4` 是规范化后的持久输入，但不是稳定的数据交换格式。
 
 ## 文档
 
@@ -214,3 +220,16 @@ Web 不包含 SSH 或真机 launch 命令，也不会启动真机控制器。检
   year      = {2026}
 }
 ```
+
+可选场景重力约束来自 Human3R：
+
+```bibtex
+@article{chen2025human3r,
+  title={Human3R: Everyone Everywhere All at Once},
+  author={Chen, Yue and Chen, Xingyu and Xue, Yuxuan and Chen, Anpei and Xiu, Yuliang and Gerard, Pons-Moll},
+  journal={arXiv preprint arXiv:2510.06219},
+  year={2025}
+}
+```
+
+Human3R 及其部分上游组件采用非商业许可证（包括 CC BY-NC-SA 4.0 和 NAVER Non-Commercial License）。启用该可选项前必须检查 `third-party/Human3R/LICENSE` 和 `NOTICE.txt`；本仓库集成不授予商业使用权。

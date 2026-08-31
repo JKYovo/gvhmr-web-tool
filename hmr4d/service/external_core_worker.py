@@ -108,9 +108,10 @@ def _build_cfg(output_dir, *, static_cam, f_mm=None, use_dpvo=False, verbose=Fal
     cfg.paths.vitpose_video_overlay = str(preprocess_dir / "vitpose_video_overlay.mp4")
     cfg.paths.slam = str(preprocess_dir / "slam_results.pt")
     cfg.paths.hmr4d_results = str(output_dir / "hmr4d_results.pt")
-    cfg.paths.incam_video = str(output_dir / "1_incam.mp4")
-    cfg.paths.global_video = str(output_dir / "2_global.mp4")
-    cfg.paths.incam_global_horiz_video = str(output_dir / f"{output_dir.name}_3_incam_global_horiz.mp4")
+    preview_dir = output_dir / "preview"
+    cfg.paths.incam_video = str(preview_dir / "incam.mp4")
+    cfg.paths.global_video = str(preview_dir / "global.mp4")
+    cfg.paths.incam_global_horiz_video = str(preview_dir / "comparison.mp4")
     cfg.ckpt_path = str(Path("inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt"))
     return cfg
 
@@ -128,16 +129,252 @@ def _prepare_video_copy(source_path, destination_path):
 
 def _cleanup_preprocess(preprocess_dir):
     preprocess_dir = Path(preprocess_dir)
-    bbx_path = preprocess_dir / "bbx.pt"
-    preserved_bbx = bbx_path.read_bytes() if bbx_path.is_file() else None
     if preprocess_dir.exists():
         shutil.rmtree(preprocess_dir)
-    if preserved_bbx is not None:
-        preprocess_dir.mkdir(parents=True, exist_ok=True)
-        bbx_path.write_bytes(preserved_bbx)
 
 
-def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mode):
+def _run_stage(command, *, cwd, label, env=None):
+    """Run one post-process stage while forwarding useful logs to the Web job."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    recent = []
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        print(f"[{label}] {line}", flush=True)
+        recent.append(line)
+        if len(recent) > 40:
+            recent.pop(0)
+    process.stdout.close()
+    return_code = process.wait()
+    if return_code != 0:
+        detail = "\n".join(recent) or f"exit code {return_code}"
+        raise RuntimeError(f"{label} failed:\n{detail}")
+
+
+def _ground_paths(output_dir):
+    diagnostics = Path(output_dir) / "diagnostics"
+    constraint = diagnostics / "ground_constraint"
+    return {
+        "diagnostics": diagnostics,
+        "raw": diagnostics / "source" / "hmr4d_results_raw.pt",
+        "constraint": constraint,
+        "contact": constraint / "contact_global_v1_1",
+        "gravity": constraint / "gravity_alignment",
+        "human3r_scene": constraint / "human3r_scene",
+        "work": Path(output_dir) / ".work" / "human3r_reconstruction",
+    }
+
+
+def _run_contact_constraint(core_root, video_path, input_path, contact_dir):
+    script = core_root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"Contact global V1.1 postprocessor not found: {script}")
+    contact_dir.mkdir(parents=True, exist_ok=True)
+    enhanced_path = contact_dir / "contact_global_root_hmr4d_results.pt"
+    metrics_path = contact_dir / "metrics.json"
+    if not enhanced_path.is_file() or not metrics_path.is_file():
+        _run_stage(
+            [
+                sys.executable,
+                str(script),
+                "--gvhmr-result",
+                str(input_path),
+                "--video",
+                str(video_path),
+                "--output-dir",
+                str(contact_dir),
+            ],
+            cwd=core_root,
+            label="Ground Constraint",
+        )
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Ground constraint metrics are missing or invalid: {exc}") from exc
+    decision = metrics.get("decision")
+    if decision not in {"diagnostic_pass", "guardrail_failed"} or not enhanced_path.is_file():
+        raise RuntimeError(
+            "Contact global V1.1 did not produce a valid constrained result: "
+            f"{_ground_constraint_fallback_reason(metrics, decision)}"
+        )
+    warning = (
+        _ground_constraint_fallback_reason(metrics, decision)
+        if decision == "guardrail_failed"
+        else None
+    )
+    return enhanced_path, metrics_path, warning
+
+
+def _run_gravity_alignment(core_root, raw_path, gravity_source, gravity_dir):
+    script = core_root / "tools" / "bench" / "human3r_p2y" / "apply_scene_gravity.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"Scene gravity postprocessor not found: {script}")
+    gravity_dir.mkdir(parents=True, exist_ok=True)
+    aligned_path = gravity_dir / "gravity_aligned_hmr4d_results.pt"
+    metrics_path = gravity_dir / "metrics.json"
+    if not aligned_path.is_file() or not metrics_path.is_file():
+        _run_stage(
+            [
+                sys.executable,
+                str(script),
+                "--gvhmr-result",
+                str(raw_path),
+                "--ground-plane",
+                str(gravity_source),
+                "--output-dir",
+                str(gravity_dir),
+            ],
+            cwd=core_root,
+            label="Gravity Alignment",
+        )
+    return aligned_path, metrics_path
+
+
+def _estimate_standing_gravity(core_root, raw_path, gravity_dir):
+    script = core_root / "tools" / "bench" / "human3r_p2y" / "estimate_standing_gravity.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"Standing gravity calibrator not found: {script}")
+    gravity_dir.mkdir(parents=True, exist_ok=True)
+    gravity_source = gravity_dir / "standing_gravity.json"
+    if not gravity_source.is_file():
+        _run_stage(
+            [
+                sys.executable,
+                str(script),
+                "--gvhmr-result",
+                str(raw_path),
+                "--output",
+                str(gravity_source),
+            ],
+            cwd=core_root,
+            label="Standing Gravity",
+        )
+    return gravity_source
+
+
+def _run_human3r_ground(core_root, video_path, paths, *, save_intermediate):
+    human3r_python = Path(
+        os.environ.get(
+            "HUMAN3R_PYTHON",
+            "/home/user-kevien/miniforge3/envs/human3r/bin/python",
+        )
+    ).expanduser().resolve()
+    model_path = Path(
+        os.environ.get(
+            "HUMAN3R_MODEL_PATH",
+            str(core_root / "inputs" / "human3r_assets" / "human3r_672S.pth"),
+        )
+    ).expanduser().resolve()
+    human3r_root = core_root / "third-party" / "Human3R"
+    dinov2_root = core_root / "third-party" / "dinov2"
+    run_script = core_root / "tools" / "bench" / "human3r_p2y" / "run_human3r_headless.py"
+    extract_script = core_root / "tools" / "bench" / "human3r_p2y" / "extract_ground_plane.py"
+    body_model_root = core_root / "runtime" / "checkpoints" / "body_models"
+    mean_params = core_root / "hmr4d" / "network" / "hmr2" / "configs" / "smpl_mean_params.npz"
+    curope_dir = human3r_root / "src" / "croco" / "models" / "curope"
+    curope_extension = next(curope_dir.glob("curope*.so"), None)
+    for path, label in (
+        (human3r_python, "Human3R Python"),
+        (model_path, "Human3R checkpoint"),
+        (human3r_root / "demo.py", "Human3R submodule"),
+        (dinov2_root / "hubconf.py", "DINOv2 submodule"),
+        (run_script, "Human3R runner"),
+        (extract_script, "Human3R ground extractor"),
+        (body_model_root / "smplx" / "SMPLX_NEUTRAL.npz", "SMPL-X neutral model"),
+        (mean_params, "SMPL mean parameters"),
+        (curope_extension, "Human3R CUDA RoPE extension"),
+    ):
+        if path is None or not path.is_file():
+            raise FileNotFoundError(f"{label} not found: {path}")
+
+    scene_dir = paths["human3r_scene"]
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    ground_path = scene_dir / "ground_plane.json"
+    reconstruction = paths["work"]
+    human3r_env = os.environ.copy()
+    human3r_env["PYTHONNOUSERSITE"] = "1"
+    human3r_env.pop("PYTHONPATH", None)
+    if not ground_path.is_file():
+        if reconstruction.exists():
+            shutil.rmtree(reconstruction)
+        reconstruction.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _run_stage(
+                [
+                    str(human3r_python),
+                    str(run_script),
+                    "--seq_path",
+                    str(video_path),
+                    "--model_path",
+                    str(model_path),
+                    "--output_dir",
+                    str(reconstruction),
+                    "--human3r_root",
+                    str(human3r_root),
+                    "--dinov2_root",
+                    str(dinov2_root),
+                    "--body_model_root",
+                    str(body_model_root),
+                    "--mean_params",
+                    str(mean_params),
+                    "--size",
+                    "512",
+                    "--chunk_size",
+                    "100",
+                    "--use_ttt3r",
+                ],
+                cwd=core_root,
+                env=human3r_env,
+                label="Human3R",
+            )
+            _run_stage(
+                [
+                    str(human3r_python),
+                    str(extract_script),
+                    "--human3r-dir",
+                    str(reconstruction),
+                    "--output-dir",
+                    str(scene_dir),
+                ],
+                cwd=core_root,
+                env=human3r_env,
+                label="Human3R Ground",
+            )
+            metadata = reconstruction / "run_metadata.json"
+            if metadata.is_file():
+                shutil.copy2(metadata, scene_dir / "run_metadata.json")
+        finally:
+            if not save_intermediate:
+                shutil.rmtree(reconstruction, ignore_errors=True)
+                try:
+                    reconstruction.parent.rmdir()
+                except OSError:
+                    pass
+                median_depth = scene_dir / "median_depth.npy"
+                median_depth.unlink(missing_ok=True)
+    return ground_path
+
+
+def _apply_ground_constraint(
+    core_root,
+    output_dir,
+    video_path,
+    result_path,
+    mode,
+    *,
+    static_cam=True,
+    save_intermediate=False,
+):
     """Apply an optional core post-process while preserving the raw tensor."""
     output_dir = Path(output_dir)
     result_path = Path(result_path)
@@ -146,87 +383,82 @@ def _apply_ground_constraint(core_root, output_dir, video_path, result_path, mod
             "ground_constraint": "none",
             "ground_constraint_status": "not_requested",
         }
-    if mode == "human3r":
-        raise ValueError("Human3R scene constraint is present in the UI but is not enabled yet.")
-    if mode != "flat_y":
+    if mode not in {"flat_y", "gravity_flat", "human3r"}:
         raise ValueError(f"Unsupported ground constraint: {mode}")
+    if mode in {"gravity_flat", "human3r"} and not static_cam:
+        raise ValueError(f"{mode} requires the static camera option")
 
-    raw_path = output_dir / "hmr4d_results_raw.pt"
+    paths = _ground_paths(output_dir)
+    raw_path = paths["raw"]
     if not raw_path.is_file():
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(result_path, raw_path)
 
-    constraint_dir = output_dir / "ground_constraint_global_v1_1"
-    constraint_dir.mkdir(parents=True, exist_ok=True)
-    enhanced_path = constraint_dir / "contact_global_root_hmr4d_results.pt"
-    metrics_path = constraint_dir / "metrics.json"
-    script = core_root / "tools" / "bench" / "human3r_p2y" / "apply_contact_global_root.py"
-    if not script.is_file():
-        raise FileNotFoundError(f"Contact global V1.1 postprocessor not found: {script}")
-
-    error = None
-    if not enhanced_path.is_file():
-        command = [
-            sys.executable,
-            str(script),
-            "--gvhmr-result",
-            str(raw_path),
-            "--video",
-            str(video_path),
-            "--output-dir",
-            str(constraint_dir),
-        ]
-        completed = subprocess.run(
-            command,
-            cwd=core_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            error = completed.stdout.strip() or f"exit code {completed.returncode}"
-
-    decision = None
-    metrics = None
-    if metrics_path.is_file():
+    contact_input = raw_path
+    gravity_source = None
+    gravity_metrics = None
+    effective_mode = mode
+    fallback_reason = None
+    if mode == "gravity_flat":
         try:
-            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-            decision = metrics.get("decision")
-        except (OSError, ValueError):
-            decision = None
-
-    accepted_decisions = {"diagnostic_pass", "guardrail_failed"}
-    if error is None and decision in accepted_decisions and enhanced_path.is_file():
-        shutil.copy2(enhanced_path, result_path)
-        warning = None
-        if decision == "guardrail_failed":
-            warning = _ground_constraint_fallback_reason(metrics, decision)
+            gravity_source = _estimate_standing_gravity(
+                core_root, raw_path, paths["gravity"]
+            )
+            contact_input, gravity_metrics = _run_gravity_alignment(
+                core_root, raw_path, gravity_source, paths["gravity"]
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            effective_mode = "flat_y"
+            fallback_reason = str(exc).strip() or exc.__class__.__name__
             print(
-                "[Ground Constraint] Contact global V1.1 applied despite diagnostic "
-                f"guardrails: {warning}",
+                "[Gravity Alignment] Standing calibration unavailable; "
+                f"falling back to automatic flat ground: {fallback_reason}",
                 flush=True,
             )
-        else:
-            print(
-                "[Ground Constraint] Contact global V1.1 applied; raw tensor preserved.",
-                flush=True,
-            )
-        payload = {
-            "ground_constraint": "flat_y",
-            "ground_constraint_status": "applied",
-            "raw_hmr4d_results_path": str(raw_path.resolve()),
-            "global_contact_results_path": str(enhanced_path.resolve()),
-            "ground_constraint_metrics_path": str(metrics_path.resolve()),
-        }
-        if warning:
-            payload["ground_constraint_warning"] = warning
-        return payload
+    elif mode == "human3r":
+        gravity_source = _run_human3r_ground(
+            core_root,
+            video_path,
+            paths,
+            save_intermediate=save_intermediate,
+        )
+        contact_input, gravity_metrics = _run_gravity_alignment(
+            core_root, raw_path, gravity_source, paths["gravity"]
+        )
 
-    reason = error or _ground_constraint_fallback_reason(metrics, decision)
-    raise RuntimeError(
-        "Contact global V1.1 did not produce a valid constrained result; "
-        f"raw fallback is disabled: {reason}"
+    enhanced_path, metrics_path, warning = _run_contact_constraint(
+        core_root, video_path, contact_input, paths["contact"]
     )
+    shutil.copy2(enhanced_path, result_path)
+    print(
+        f"[Ground Constraint] {effective_mode} applied; diagnostics organized under "
+        f"{paths['constraint']}",
+        flush=True,
+    )
+    payload = {
+        "ground_constraint": mode,
+        "ground_constraint_effective_mode": effective_mode,
+        "ground_constraint_status": "applied",
+        "raw_hmr4d_results_path": str(raw_path.resolve()),
+        "global_contact_results_path": str(enhanced_path.resolve()),
+        "ground_constraint_metrics_path": str(metrics_path.resolve()),
+    }
+    if gravity_source is not None:
+        payload["gravity_source_path"] = str(Path(gravity_source).resolve())
+    if gravity_metrics is not None:
+        payload["gravity_alignment_metrics_path"] = str(Path(gravity_metrics).resolve())
+    overlay = paths["human3r_scene"] / "ground_overlay.png"
+    metadata = paths["human3r_scene"] / "run_metadata.json"
+    if overlay.is_file():
+        payload["human3r_ground_overlay_path"] = str(overlay.resolve())
+    if metadata.is_file():
+        payload["human3r_run_metadata_path"] = str(metadata.resolve())
+    warnings = [item for item in (fallback_reason, warning) if item]
+    if warnings:
+        payload["ground_constraint_warning"] = "；".join(warnings)
+    if fallback_reason:
+        payload["ground_constraint_fallback_reason"] = fallback_reason
+    return payload
 
 
 def _ground_constraint_fallback_reason(metrics, decision):
@@ -291,7 +523,7 @@ def _apply_orientation_guard(output_dir, result_path):
 
     output_dir = Path(output_dir)
     result_path = Path(result_path)
-    guard_dir = output_dir / "orientation_guard"
+    guard_dir = output_dir / "diagnostics" / "orientation_guard"
     guard_dir.mkdir(parents=True, exist_ok=True)
     original_path = guard_dir / "original_hmr4d_results.pt"
     guarded_path = guard_dir / "orientation_guard_hmr4d_results.pt"
@@ -433,7 +665,7 @@ def _process(args):
                 prediction = None
             if prediction is not None:
                 elapsed = time.perf_counter() - started
-                public_long_dir = output_dir / "long_video"
+                public_long_dir = output_dir / "diagnostics" / "long_video"
                 public_long_dir.mkdir(parents=True, exist_ok=True)
                 checkpoint = _checkpoint_identity(effective_checkpoint)
                 manifest = {
@@ -509,7 +741,7 @@ def _process(args):
                 cache_identity=cache_identity,
                 log=lambda message: print(message, flush=True),
             )
-            public_long_dir = output_dir / "long_video"
+            public_long_dir = output_dir / "diagnostics" / "long_video"
             public_long_dir.mkdir(parents=True, exist_ok=True)
             public_manifest = public_long_dir / "manifest.json"
             public_metrics = public_long_dir / "metrics.json"
@@ -538,7 +770,7 @@ def _process(args):
         torch.save(prediction, result_path)
     else:
         Log.info(f"[HMR4D] Reusing cached result at {result_path}")
-        public_long_dir = output_dir / "long_video"
+        public_long_dir = output_dir / "diagnostics" / "long_video"
         public_manifest = public_long_dir / "manifest.json"
         public_metrics = public_long_dir / "metrics.json"
         if public_manifest.is_file() and public_metrics.is_file():
@@ -562,6 +794,8 @@ def _process(args):
         cfg.video_path,
         result_path,
         args.ground_constraint,
+        static_cam=bool(args.static_cam),
+        save_intermediate=bool(args.save_intermediate),
     )
     orientation_result = _apply_orientation_guard(output_dir, result_path)
 
@@ -596,6 +830,7 @@ def _preview(args):
         raise FileNotFoundError(f"Missing inference result: {result_path}")
     if not video_path.is_file():
         raise FileNotFoundError(f"Missing processed video: {video_path}")
+    Path(cfg.paths.incam_video).parent.mkdir(parents=True, exist_ok=True)
 
     bbx_path = Path(cfg.paths.bbx)
     if not bbx_path.is_file():
@@ -666,7 +901,7 @@ def _parse_args():
     process.add_argument("--save-intermediate", action="store_true")
     process.add_argument(
         "--ground-constraint",
-        choices=("none", "flat_y", "human3r"),
+        choices=("none", "flat_y", "gravity_flat", "human3r"),
         default="none",
     )
     process.add_argument("--use-dpvo", action="store_true")

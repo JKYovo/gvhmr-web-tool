@@ -21,6 +21,8 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_HUMAN3R_ROOT = REPO_ROOT / "third-party" / "Human3R"
 DEFAULT_DINOV2_ROOT = REPO_ROOT / "third-party" / "dinov2"
+DEFAULT_BODY_MODEL_ROOT = REPO_ROOT / "runtime" / "checkpoints" / "body_models"
+DEFAULT_MEAN_PARAMS = REPO_ROOT / "hmr4d" / "network" / "hmr2" / "configs" / "smpl_mean_params.npz"
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--human3r_root", type=Path, default=DEFAULT_HUMAN3R_ROOT)
     parser.add_argument("--dinov2_root", type=Path, default=DEFAULT_DINOV2_ROOT)
+    parser.add_argument("--body_model_root", type=Path, default=DEFAULT_BODY_MODEL_ROOT)
+    parser.add_argument("--mean_params", type=Path, default=DEFAULT_MEAN_PARAMS)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--max_frames", type=int)
@@ -102,14 +106,21 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     human3r_root = args.human3r_root.resolve()
     dinov2_root = args.dinov2_root.resolve()
+    body_model_root = args.body_model_root.resolve()
+    mean_params = args.mean_params.resolve()
+    curope_dir = human3r_root / "src" / "croco" / "models" / "curope"
+    curope_extension = next(curope_dir.glob("curope*.so"), None)
 
     for path, label in (
         (seq_path, "input"),
         (model_path, "model"),
         (human3r_root, "Human3R"),
         (dinov2_root, "DINOv2"),
+        (body_model_root / "smplx" / "SMPLX_NEUTRAL.npz", "SMPL-X neutral model"),
+        (mean_params, "SMPL mean parameters"),
+        (curope_extension, "Human3R CUDA RoPE extension"),
     ):
-        if not path.exists():
+        if path is None or not path.exists():
             raise FileNotFoundError(f"{label} path does not exist: {path}")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_names = ("depth", "conf", "color", "camera", "smpl", "color_smpl")
@@ -147,6 +158,18 @@ def main() -> None:
     human3r_demo.add_path_to_dust3r(str(model_path))
     from src.dust3r.inference import inference_recurrent_lighter  # noqa: PLC0415
     from src.dust3r.model import ARCroco3DStereo  # noqa: PLC0415
+
+    # The official code hard-codes these assets under the Human3R checkout.
+    # Point it at GVHMR's existing assets instead, keeping the submodule clean
+    # and avoiding a second 109 MB SMPL-X copy. Patch only after the official
+    # import order has completed because dust3r.smpl_model and dust3r.utils
+    # otherwise form a circular import.
+    import dust3r.heads.dpt_head as human3r_dpt_head  # noqa: PLC0415
+    import dust3r.smpl_model as human3r_smpl_model  # noqa: PLC0415
+
+    human3r_smpl_model.SMPLX_DIR = str(body_model_root)
+    human3r_smpl_model.MEAN_PARAMS = str(mean_params)
+    human3r_dpt_head.MEAN_PARAMS = str(mean_params)
 
     image_paths, temp_dir, source_meta = extract_input_frames(
         seq_path, args.max_frames, args.subsample
@@ -268,6 +291,8 @@ def main() -> None:
         "model": str(model_path),
         "human3r_root": str(human3r_root),
         "dinov2_root": str(dinov2_root),
+        "body_model_root": str(body_model_root),
+        "mean_params": str(mean_params),
         "device": device,
         "size": args.size,
         "subsample": args.subsample,

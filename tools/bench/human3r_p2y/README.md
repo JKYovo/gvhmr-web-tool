@@ -1,6 +1,6 @@
 # Human3R P2-Y 离线实验
 
-该目录用于验证“由 Human3R 重建地面与箱顶，再只修正 GVHMR 全局 root Y”是否能解决爬箱视频的垂直漂移。它目前是单视频 benchmark，不在 Web 推理路径中，也不修改 `gvhmr-web-tool`。
+该目录包含 Human3R 场景实验和 Web 使用的 headless 推理、地面提取及重力校正脚本。Web 的 `human3r` 模式使用场景地面法向校正 GVHMR 重力，再执行 Contact Global V1.1；旧 P2-Y/P2-XYZ 脚本仍作为离线 benchmark 保留。
 
 ## 固定版本与环境
 
@@ -34,17 +34,9 @@ inputs/human3r_assets/human3r_672S.pth
 SHA256 84d2a70386473b58b90eef8f78521065ad10908bab647ee58d1196f5018fb778
 ```
 
-Human3R 还需要合法取得的 SMPL/SMPL-X 文件。当前 headless 路径需要在 `third-party/Human3R/src/models/` 下能解析以下文件：
+当前 headless 推理通过参数复用 WebTool 已有的 `runtime/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz` 和 `hmr4d/network/hmr2/configs/smpl_mean_params.npz`，不会向 Human3R 子模块复制人体资产。训练/评测脚本额外需要的 SMPL、joint regressor 和 `smplx2smpl.pkl` 不属于 Web 推理依赖。
 
-```text
-smpl/SMPL_NEUTRAL.pkl
-smpl/J_regressor_h36m.npy
-smpl_mean_params.npz
-smplx/SMPLX_NEUTRAL.npz
-smplx/smplx2smpl.pkl
-```
-
-这些模型文件不提交到仓库。可以使用只读符号链接，但不要把资产写入本项目的 `inputs/checkpoints`，因为该位置可能链接到 WebTool。
+`curope*.so` 是必需运行资产，不能依赖官方的慢速 PyTorch 回退；该回退在特殊位置 token 上可能越界。应按上节用 Human3R 环境和 CUDA Toolkit 编译。
 
 ## 三阶段运行
 

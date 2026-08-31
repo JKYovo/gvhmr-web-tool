@@ -5,6 +5,12 @@ outputs
 runtime
 gvhmr.egg-info
 
+# Local-only Human3R add-on. The public/customer repository must not ship or
+# initialize its source, weights, compiled extensions, or DINOv2 dependency.
+third-party/Human3R/
+third-party/dinov2/
+inputs/human3r_assets/
+
 # All file or folders start with tmp will be ignored
 tmp*  
 

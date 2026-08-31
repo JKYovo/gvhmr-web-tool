@@ -2407,6 +2407,75 @@ SONIC 播放期间保持左侧任务队列的位置、顺序和卡片内容不�
 
 ---
 
+## P38：可选重力校正、Human3R Web 启用与任务产物整理
+
+### 基本信息
+
+- 日期：2026-08-31
+- 分支：`main`
+- 状态：GPU 端到端验证完成
+- 上游依据或实验基线：Human3R `402f2b2c`、DINOv2 `7764ea0f`、Contact-aware Global Optimizer V1.1
+- 范围：源码 Web 的地面模式、Human3R 运行链路、能力检查、任务目录、下载列表和 ZIP
+- 不包含：Docker 镜像内安装 Human3R、历史任务物理迁移、Human3R 人体姿态替代 GVHMR
+
+### 优化目标
+
+把“重力校正 + 自动平地”作为严格可选模块加入 Web，正式开放 Human3R 场景地面模式；同时让新任务根目录只保留最终入口文件，避免 raw tensor、候选结果、渲染和逐帧场景文件混在一起。
+
+### 关键实现
+
+- 地面模式扩展为 `none / flat_y / gravity_flat / human3r`。
+- `gravity_flat` 从可靠站立帧估计重力，校正 global root 朝向后执行 Contact Global V1.1；没有可靠站立段时只回退一次 `flat_y`，并在任务详情记录完整原因。
+- `human3r` 用固定子模块和独立 `human3r` 环境重建场景，提取地面法向后执行同一重力校正与接触优化，不静默回退。
+- Human3R runner 将 DINOv2 路由到本地固定子模块，并直接复用 WebTool 的 SMPL-X 和 SMPL 均值参数，不再要求把资产复制或链接进 Human3R 源码树。
+- Human3R 可用性检查覆盖解释器、主权重、两个子模块、runner、地面提取脚本、SMPL-X、均值参数和编译后的 CUDA CuRoPE 扩展。任一缺失时 UI 禁用选项并返回缺失路径。
+- 新任务把预览放入 `preview/`、SONIC 导出放入 `exports/`，raw/candidate/metrics 和长视频摘要放入 `diagnostics/`。Human3R 的逐帧 `depth/conf/color/camera/smpl` 放入 `.work/human3r_reconstruction`，提取地面成功或失败后默认删除。
+- 成功规范化后，任务改用 `0_input_video.mp4` 作为持久输入并删除 `submitted_input.*`；推理完成后删除整个 `preprocess/` 缓存，不再留下孤立 `bbx.pt`。失败任务仍保留 staging 输入用于重试。
+- Web 下载列表和 `artifacts.zip` 只暴露最终 PT、SONIC reference、对比预览、Human3R 地面检查图及少量 JSON 摘要；历史任务仍可读取旧路径。
+
+### 接口、配置与资产变化
+
+- API 新增 `ground_constraint=gravity_flat|human3r`，原 `none|flat_y` 保持兼容；默认仍为 `flat_y`。
+- `gravity_flat` 与 `human3r` 当前只允许静态相机任务。
+- Human3R 默认解释器为 `/home/user-kevien/miniforge3/envs/human3r/bin/python`，可用 `HUMAN3R_PYTHON` 覆盖。
+- Human3R 默认权重为 `inputs/human3r_assets/human3r_672S.pth`，可用 `HUMAN3R_MODEL_PATH` 覆盖；本机 SHA256 为 `84d2a70386473b58b90eef8f78521065ad10908bab647ee58d1196f5018fb778`。
+- Human3R 与 DINOv2 固定 commit 分别为 `402f2b2c7f20514e99cb42e4126c46b4ff75593f`、`7764ea0f912e53c92e82eb78a2a1631e92725fc8`。
+- 公开客户仓库不分发 Human3R/DINOv2 子模块、权重或编译扩展；上述组件仅存在于本机私有工作区。公开部署中 Human3R capability disabled 是预期状态。
+
+### 验证方法与结果
+
+- `tests/test_service_web.py`：34 项通过，覆盖四种模式持久化、站立重力回退、能力检查、新旧路径兼容、临时输入/预处理清理、精简 ZIP 和 SONIC exports；完整测试集 56 项通过。
+- 两帧真实 Human3R smoke：checkpoint 严格加载，推理与全部输出保存成功；峰值 CUDA allocated 约 `4.31 GB`。
+- 133 帧 `getup_back` Web 后处理端到端成功：Human3R 推理 `39.31 s`，总 Human3R 阶段 `67.05 s`，峰值 CUDA allocated `4.34 GB`。
+- 场景地面法向为 `[-0.0063, 0.9702, 0.2422]`，平面残差 median/P95 为 `1.02/2.35 cm`。
+- 重力残差中位数从 `9.74°` 降至 `0.24°`；接触支撑高度绝对误差 P95 从 `13.72 cm` 降至 `1.94 cm`，悬空超过 3 cm 和穿地超过 1 cm 的比例都降为 `0%`。
+- Contact Global V1.1 全部保护项通过，最终 tensor schema 不变，`body_pose/global_orient/betas/incam/K_fullimg/net_outputs` 保持不变且 root 有限。
+- 默认清理确认：`.work/human3r_reconstruction` 不存在；场景 diagnostics 只保留 `ground_plane.json`、`ground_overlay.png` 和 `run_metadata.json`。
+
+### 未完成项和已知风险
+
+- Human3R 明显慢于站立帧自标定，适合场景法向确有价值的任务，不应作为默认模式。
+- 当前只支持静态相机重力对齐；移动相机需要按帧结合相机姿态传播地面法向，不能直接开放。
+- CuRoPE 编译需要 CUDA Toolkit 的 `nvcc`。本机 WebTool 复用了同 commit、同 Python/CUDA 环境已经编译的二进制；全新部署必须按安装文档自行编译。
+- 本次数值只证明 `getup_back` 样本链路和指标通过，不代表所有视频视觉效果一定改善，仍应查看地面检查图或预览。
+
+### 回退方式
+
+Web 中选择“不启用”可保留 FootMR 原始 root；选择“自动平地约束”可只使用 V1.1。删除新增的两个 mode 路由和 Human3R runner 即可代码回退，不影响已生成任务。
+
+### 主要涉及文件
+
+- `hmr4d/service/external_core_worker.py`
+- `hmr4d/service/manager.py`
+- `hmr4d/service/server.py`
+- `hmr4d/service/store.py`
+- `hmr4d/service/static_app/`
+- `tools/bench/human3r_p2y/`
+- `tests/test_service_web.py`
+- `README.md`、`README.en.md`、`docs/INSTALL.md`
+
+---
+
 ## 后续优化记录模板
 
 复制以下小节并追加到本文档，不能覆盖历史记录。

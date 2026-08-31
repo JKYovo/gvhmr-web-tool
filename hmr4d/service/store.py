@@ -146,6 +146,9 @@ class SQLiteJobStore:
             "save_intermediate": job["save_intermediate"],
             "generate_preview": job["generate_preview"],
             "ground_constraint": job.get("ground_constraint", "none"),
+            "ground_constraint_effective_mode": job.get(
+                "ground_constraint_effective_mode", job.get("ground_constraint", "none")
+            ),
             "ground_constraint_status": job.get("ground_constraint_status", "not_requested"),
             "ground_constraint_error": job.get("ground_constraint_error"),
             "ground_constraint_fallback_reason": job.get(

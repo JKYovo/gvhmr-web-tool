@@ -110,6 +110,10 @@ function hasArtifact(job, key) {
     global_contact_results: artifacts.global_contact_results_path,
     flat_ground_y_results: artifacts.flat_ground_y_results_path,
     ground_constraint_metrics: artifacts.ground_constraint_metrics_path,
+    gravity_source: artifacts.gravity_source_path,
+    gravity_alignment_metrics: artifacts.gravity_alignment_metrics_path,
+    human3r_ground_overlay: artifacts.human3r_ground_overlay_path,
+    human3r_run_metadata: artifacts.human3r_run_metadata_path,
     sonic_reference: artifacts.sonic_reference_path,
     sonic_metadata: artifacts.sonic_metadata_path,
     incam_video: artifacts.incam_video_path,
@@ -188,7 +192,14 @@ function renderCapabilities({ initializeForms = false } = {}) {
   const groundOptions = new Map((groundConfig.options || []).map((item) => [item.value, item]));
   document.querySelectorAll('input[name="ground_constraint"]').forEach((input) => {
     const option = groundOptions.get(input.value);
-    if (option) input.disabled = !option.enabled;
+    if (option) {
+      input.disabled = !option.enabled;
+      const label = input.closest(".ground-option");
+      if (label) {
+        label.classList.toggle("disabled", !option.enabled);
+        label.title = option.enabled ? "" : (option.reason || "当前环境不可用");
+      }
+    }
   });
   if (initializeForms) {
     const groundDefault = groundConfig.default || "none";
@@ -555,14 +566,9 @@ function renderDownloads(job) {
   }
   const items = [
     ["hmr4d_results", "当前动作结果 PT"],
-    ["raw_hmr4d_results", "原始 FootMR PT"],
-    ["global_contact_results", "Global V1.1 结果 PT"],
-    ["ground_constraint_metrics", "地面约束指标 JSON"],
     ["sonic_reference", "SONIC Reference NPZ"],
-    ["sonic_metadata", "SONIC 转换信息 JSON"],
     ["preview_video", "对比预览 MP4"],
-    ["incam_video", "相机视角 MP4"],
-    ["global_video", "全局视角 MP4"],
+    ["human3r_ground_overlay", "Human3R 地面检查图"],
   ].filter(([key]) => hasArtifact(job, key));
   const links = items.map(([key, label]) => (
     `<a class="download" href="${artifactUrl(job, key)}">${escapeHtml(label)}</a>`
@@ -677,7 +683,7 @@ function actionHint(job) {
   }
   if (job.ground_constraint_warning) {
     return {
-      text: `自动平地结果已采用；诊断提示：${job.ground_constraint_warning}`,
+      text: `地面约束结果已采用；诊断提示：${job.ground_constraint_warning}`,
       kind: "warning",
     };
   }
@@ -860,7 +866,10 @@ function renderJobDetail(job) {
       metric("地面约束", {
         none: "不启用",
         flat_y: job.ground_constraint_status === "fallback" ? "自动平地（已回退）" : "自动平地",
-        human3r: "Human3R",
+        gravity_flat: job.ground_constraint_effective_mode === "flat_y"
+          ? "重力校正（已回退自动平地）"
+          : "重力校正 + 自动平地",
+        human3r: "Human3R 场景重力 + 自动平地",
       }[job.ground_constraint || "none"] || job.ground_constraint),
       metric("焦距 f_mm", job.f_mm ?? "自动"),
     ];

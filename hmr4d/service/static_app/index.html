@@ -55,7 +55,8 @@
                   <div class="ground-options">
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="none"><span>不启用</span><small>保留原始 FootMR root</small></label>
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="flat_y" checked><span>自动平地约束</span><small>默认；整段 root XYZ 接触优化</small></label>
-                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束 <em class="feature-tag">新</em></span><small>尚未启用</small></label>
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="gravity_flat"><span>重力校正 + 自动平地 <em class="feature-tag">新</em></span><small>固定相机；用可靠站立帧修复趴卧倾斜</small></label>
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="human3r"><span>Human3R 场景重力 + 自动平地</span><small>固定相机；较慢，使用场景地面法向</small></label>
                   </div>
                 </fieldset>
               </div>
@@ -87,7 +88,8 @@
                   <div class="ground-options">
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="none"><span>不启用</span><small>保留原始 FootMR root</small></label>
                     <label class="ground-option"><input type="radio" name="ground_constraint" value="flat_y" checked><span>自动平地约束</span><small>默认；整段 root XYZ 接触优化</small></label>
-                    <label class="ground-option disabled"><input type="radio" name="ground_constraint" value="human3r" disabled><span>Human3R 场景约束 <em class="feature-tag">新</em></span><small>尚未启用</small></label>
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="gravity_flat"><span>重力校正 + 自动平地 <em class="feature-tag">新</em></span><small>固定相机；用可靠站立帧修复趴卧倾斜</small></label>
+                    <label class="ground-option"><input type="radio" name="ground_constraint" value="human3r"><span>Human3R 场景重力 + 自动平地</span><small>固定相机；较慢，使用场景地面法向</small></label>
                   </div>
                 </fieldset>
               </div>
@@ -201,6 +203,6 @@
     </section>
   </main>
 
-  <script src="static/app.js?v=20260817-sonic-queue-freeze"></script>
+  <script src="static/app.js?v=20260831-gravity-modes"></script>
 </body>
 </html>

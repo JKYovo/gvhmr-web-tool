@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 import unittest
 import zipfile
@@ -18,6 +19,7 @@ from hmr4d.service.common import zip_artifacts
 from hmr4d.service.external_core import ExternalCoreRunner, RESULT_PREFIX
 from hmr4d.service.external_core_worker import (
     _apply_ground_constraint,
+    _cleanup_preprocess,
     _ensure_chumpy_numpy_compat as ensure_external_chumpy_compat,
     _merge_preview_videos,
 )
@@ -241,7 +243,34 @@ class ServiceWebTest(unittest.TestCase):
         upload_root = self.settings.output_root.parent / "uploads"
         self.assertFalse(upload_root.exists() and any(upload_root.iterdir()))
 
-    def test_ground_constraint_selection_is_persisted_and_human3r_is_disabled(self):
+    def test_successful_processing_adopts_normalized_input_and_removes_staging_copy(self):
+        source = Path(self.temp_dir.name) / "staged.mov"
+        source.write_bytes(b"source")
+        job = self.manager.submit_job(video_source=source, static_cam=True)
+        self._drain_submitted_job()
+        staged = Path(job["input_video"])
+        normalized = Path(job["output_dir"]) / "0_input_video.mp4"
+        normalized.write_bytes(b"normalized")
+
+        self.manager._adopt_processed_input(
+            job, {"input_video_path": str(normalized)}
+        )
+
+        self.assertEqual(Path(job["input_video"]), normalized)
+        self.assertFalse(staged.exists())
+        self.assertEqual(normalized.read_bytes(), b"normalized")
+
+    def test_preprocess_cleanup_removes_the_complete_cache_directory(self):
+        preprocess = Path(self.temp_dir.name) / "job" / "preprocess"
+        preprocess.mkdir(parents=True)
+        (preprocess / "bbx.pt").write_bytes(b"bbox")
+        (preprocess / "vitpose.pt").write_bytes(b"pose")
+
+        _cleanup_preprocess(preprocess)
+
+        self.assertFalse(preprocess.exists())
+
+    def test_ground_constraint_selections_are_persisted(self):
         response = self.client.post(
             "/api/jobs/upload",
             files={"file": ("dance.mp4", b"video-bytes", "video/mp4")},
@@ -252,13 +281,22 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(response.json()["ground_constraint_status"], "pending")
         self.assertIsNone(response.json()["ground_constraint_warning"])
 
-        disabled = self.client.post(
+        human3r = self.client.post(
             "/api/jobs/upload",
             files={"file": ("scene.mp4", b"video-bytes", "video/mp4")},
             data={"ground_constraint": "human3r"},
         )
-        self.assertEqual(disabled.status_code, 400, disabled.text)
-        self.assertIn("not enabled", disabled.json()["detail"])
+        self.assertEqual(human3r.status_code, 200, human3r.text)
+        self.assertEqual(human3r.json()["ground_constraint"], "human3r")
+        self.assertEqual(human3r.json()["ground_constraint_status"], "pending")
+
+        moving_camera = self.client.post(
+            "/api/jobs/upload",
+            files={"file": ("moving.mp4", b"video-bytes", "video/mp4")},
+            data={"static_cam": "false", "ground_constraint": "human3r"},
+        )
+        self.assertEqual(moving_camera.status_code, 400)
+        self.assertIn("requires the static camera option", moving_camera.text)
 
     def test_contact_global_v1_1_preserves_raw_and_selects_enhanced(self):
         root = Path(self.temp_dir.name) / "flat-core"
@@ -287,9 +325,44 @@ class ServiceWebTest(unittest.TestCase):
 
         self.assertEqual(result["ground_constraint_status"], "applied")
         self.assertEqual(selected.read_bytes(), b"enhanced")
-        self.assertEqual((output / "hmr4d_results_raw.pt").read_bytes(), b"raw")
+        self.assertEqual(
+            (output / "diagnostics/source/hmr4d_results_raw.pt").read_bytes(), b"raw"
+        )
         self.assertIn("global_contact_results_path", result)
         self.assertNotIn("flat_ground_y_results_path", result)
+
+    def test_standing_gravity_falls_back_once_to_flat_ground(self):
+        root = Path(self.temp_dir.name) / "gravity-fallback-core"
+        script_dir = root / "tools/bench/human3r_p2y"
+        script_dir.mkdir(parents=True)
+        (script_dir / "estimate_standing_gravity.py").write_text(
+            "raise SystemExit('no reliable standing segment')\n", encoding="utf-8"
+        )
+        (script_dir / "apply_contact_global_root.py").write_text(
+            "import argparse, json\n"
+            "from pathlib import Path\n"
+            "p=argparse.ArgumentParser(); p.add_argument('--gvhmr-result'); "
+            "p.add_argument('--video'); p.add_argument('--output-dir'); a=p.parse_args()\n"
+            "out=Path(a.output_dir); out.mkdir(parents=True, exist_ok=True)\n"
+            "(out/'contact_global_root_hmr4d_results.pt').write_bytes(b'flat')\n"
+            "(out/'metrics.json').write_text(json.dumps({'decision':'diagnostic_pass'}))\n",
+            encoding="utf-8",
+        )
+        output = root / "output"
+        output.mkdir()
+        result_path = output / "hmr4d_results.pt"
+        result_path.write_bytes(b"raw")
+        video = output / "0_input_video.mp4"
+        video.write_bytes(b"video")
+
+        result = _apply_ground_constraint(
+            root, output, video, result_path, "gravity_flat", static_cam=True
+        )
+
+        self.assertEqual(result["ground_constraint_status"], "applied")
+        self.assertEqual(result["ground_constraint_effective_mode"], "flat_y")
+        self.assertIn("no reliable standing segment", result["ground_constraint_fallback_reason"])
+        self.assertEqual(result_path.read_bytes(), b"flat")
 
     def test_contact_global_failure_fails_without_raw_or_legacy_fallback(self):
         root = Path(self.temp_dir.name) / "fallback-core"
@@ -307,11 +380,13 @@ class ServiceWebTest(unittest.TestCase):
         output.mkdir()
         selected = output / "hmr4d_results.pt"
         selected.write_bytes(b"legacy-enhanced")
-        (output / "hmr4d_results_raw.pt").write_bytes(b"raw")
+        raw = output / "diagnostics/source/hmr4d_results_raw.pt"
+        raw.parent.mkdir(parents=True)
+        raw.write_bytes(b"raw")
         video = output / "0_input_video.mp4"
         video.write_bytes(b"video")
 
-        with self.assertRaisesRegex(RuntimeError, "raw fallback is disabled"):
+        with self.assertRaisesRegex(RuntimeError, "Ground Constraint failed"):
             _apply_ground_constraint(root, output, video, selected, "flat_y")
 
         self.assertEqual(selected.read_bytes(), b"legacy-enhanced")
@@ -438,12 +513,12 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(Path(job["artifacts"]["global_contact_results_path"]), constraint_result)
         with zipfile.ZipFile(job["artifacts"]["artifacts_zip_path"]) as archive:
             self.assertIn("hmr4d_results.pt", archive.namelist())
-            self.assertIn(
+            self.assertNotIn(
                 "ground_constraint_global_v1_1/contact_global_root_hmr4d_results.pt",
                 archive.namelist(),
             )
-            self.assertIn("ground_constraint_global_v1_1/metrics.json", archive.namelist())
-            self.assertIn(preview_path.name, archive.namelist())
+            self.assertIn("diagnostics/ground_constraint_metrics.json", archive.namelist())
+            self.assertIn("preview/comparison.mp4", archive.namelist())
 
         response = self.client.get(f"/jobs/{job['job_id']}/artifact/preview_video?inline=true")
         self.assertEqual(response.status_code, 200)
@@ -723,8 +798,8 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(updated["sonic_status"], "complete")
         self.assertEqual(updated["sonic_frame"], first["frames"])
         self.assertEqual(updated["sonic_target"], "simulation")
-        reference = output_dir / "sonic_reference.npz"
-        metadata = output_dir / "sonic_conversion.json"
+        reference = output_dir / "exports/sonic_reference.npz"
+        metadata = output_dir / "exports/sonic_conversion.json"
         self.assertEqual(Path(updated["artifacts"]["sonic_reference_path"]), reference)
         self.assertEqual(Path(updated["artifacts"]["sonic_metadata_path"]), metadata)
         self.assertTrue(reference.is_file())
@@ -734,8 +809,8 @@ class ServiceWebTest(unittest.TestCase):
             200,
         )
         with zipfile.ZipFile(updated["artifacts"]["artifacts_zip_path"]) as archive:
-            self.assertIn("sonic_reference.npz", archive.namelist())
-        self.assertIn("sonic_conversion.json", archive.namelist())
+            self.assertIn("exports/sonic_reference.npz", archive.namelist())
+            self.assertIn("exports/sonic_conversion.json", archive.namelist())
 
     def test_replaced_sonic_session_cannot_overwrite_new_session_state(self):
         from hmr4d.utils.sonic import PlaybackState
@@ -808,14 +883,14 @@ class ServiceWebTest(unittest.TestCase):
         self.assertAlmostEqual(slow["duration_s"] / normal["duration_s"], 1 / 0.65, places=1)
         self.assertFalse(slow["reused"])
         self.assertTrue(reused["reused"])
-        self.assertTrue((output_dir / "sonic_reference.npz").is_file())
-        self.assertTrue((output_dir / "sonic_reference_speed_0_65.npz").is_file())
-        self.assertTrue((output_dir / "sonic_conversion_speed_0_65.json").is_file())
+        self.assertTrue((output_dir / "exports/sonic_reference.npz").is_file())
+        self.assertTrue((output_dir / "exports/sonic_reference_speed_0_65.npz").is_file())
+        self.assertTrue((output_dir / "exports/sonic_conversion_speed_0_65.json").is_file())
         updated = self.manager.get_job(job["job_id"])
         self.assertEqual(updated["sonic_speed"], 0.65)
         self.assertEqual(
             Path(updated["artifacts"]["sonic_reference_path"]),
-            output_dir / "sonic_reference_speed_0_65.npz",
+            output_dir / "exports/sonic_reference_speed_0_65.npz",
         )
 
     def test_sonic_pause_stops_live_stream_and_marks_idle_fallback(self):
@@ -876,6 +951,7 @@ class ServiceWebTest(unittest.TestCase):
         self.assertEqual(payload["ground_constraints"]["default"], "none")
         options = {item["value"]: item for item in payload["ground_constraints"]["options"]}
         self.assertFalse(options["flat_y"]["enabled"])
+        self.assertFalse(options["gravity_flat"]["enabled"])
         self.assertFalse(options["human3r"]["enabled"])
 
     def test_ground_constraint_capability_requires_global_v1_1_script(self):
@@ -899,7 +975,40 @@ class ServiceWebTest(unittest.TestCase):
         global_options = {item["value"]: item for item in global_v1_1["options"]}
         self.assertEqual(global_v1_1["default"], "flat_y")
         self.assertTrue(global_options["flat_y"]["enabled"])
+        self.assertFalse(global_options["gravity_flat"]["enabled"])
         self.assertIn("Global V1.1", global_options["flat_y"]["label"])
+
+        (script_dir / "apply_scene_gravity.py").write_text("", encoding="utf-8")
+        (script_dir / "estimate_standing_gravity.py").write_text("", encoding="utf-8")
+        gravity = _ground_constraint_capabilities(runtime)
+        gravity_options = {item["value"]: item for item in gravity["options"]}
+        self.assertTrue(gravity_options["gravity_flat"]["enabled"])
+        self.assertFalse(gravity_options["human3r"]["enabled"])
+
+        (script_dir / "run_human3r_headless.py").write_text("", encoding="utf-8")
+        (script_dir / "extract_ground_plane.py").write_text("", encoding="utf-8")
+        (root / "third-party/Human3R").mkdir(parents=True)
+        (root / "third-party/Human3R/demo.py").write_text("", encoding="utf-8")
+        (root / "third-party/Human3R/src/croco/models/curope").mkdir(parents=True)
+        (root / "third-party/Human3R/src/croco/models/curope/curope.test.so").write_bytes(
+            b"extension"
+        )
+        (root / "third-party/dinov2").mkdir(parents=True)
+        (root / "third-party/dinov2/hubconf.py").write_text("", encoding="utf-8")
+        (root / "inputs/human3r_assets").mkdir(parents=True)
+        (root / "inputs/human3r_assets/human3r_672S.pth").write_bytes(b"model")
+        (root / "runtime/checkpoints/body_models/smplx").mkdir(parents=True)
+        (root / "runtime/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz").write_bytes(
+            b"smplx"
+        )
+        (root / "hmr4d/network/hmr2/configs").mkdir(parents=True)
+        (root / "hmr4d/network/hmr2/configs/smpl_mean_params.npz").write_bytes(
+            b"mean"
+        )
+        with patch.dict("os.environ", {"HUMAN3R_PYTHON": sys.executable}):
+            human3r = _ground_constraint_capabilities(runtime)
+        human3r_options = {item["value"]: item for item in human3r["options"]}
+        self.assertTrue(human3r_options["human3r"]["enabled"])
 
     def test_external_core_runner_uses_subprocess_protocol(self):
         root = Path(self.temp_dir.name)
